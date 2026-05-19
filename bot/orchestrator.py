@@ -28,6 +28,7 @@ from bot.models import BotState, TradeIntent, TradeRecord, utc_now_iso
 from bot.clob_utils import parse_midpoint
 from bot.reconcile import reconcile_trade_records_inplace, snapshot_open_orders
 from bot.db.kv import append_paper_trade_log, append_trade_log
+from bot.db.models import TradeLog, session_scope
 from bot.exposure import category_exposure_usd, condition_exposure_usd, rolling_notional_usd
 from bot.execution_plan import plan_execution_units
 from bot.market_intel import hours_until_resolution_end
@@ -163,11 +164,83 @@ class TradingBot:
             self.state.errors.append(f"Init: {e}")
             return False
 
-        await self.refresh_balance()
+        # E3: rehydrate trade_history from DB BEFORE the first cycle so the
+        # in-memory dedupe / rolling-notional window sees prior submits that
+        # happened just before a crash. Reconcile only checks open CLOB
+        # orders — it cannot recover trades that were persisted to DB but
+        # lost from memory.
+        try:
+            await asyncio.to_thread(self.load_recent_trades)
+        except Exception as e:
+            log.warning("load_recent_trades failed on boot: %s", e)
+
+        # E2: refresh_balance can raise BalanceRefreshError. On boot we
+        # surface the failure but do not crash initialize — the next cycle
+        # will retry and abort safely if RPCs are still dark.
+        try:
+            await self.refresh_balance()
+        except BalanceRefreshError as e:
+            log.warning("initial balance refresh failed: %s", e)
+            self.state.errors.append("balance_refresh_failed")
         await self.refresh_positions()
         self.state.started_at = utc_now_iso()
         self.state.running = True
         return True
+
+    def load_recent_trades(self, *, hours: float = 24.0, max_rows: int = 200) -> int:
+        """E3: Populate state.trade_history from the trade_logs DB table on
+        boot so dedupe and rolling-notional accounting survive a restart.
+
+        Bounded by (last `hours`) AND `max_rows`, whichever is smaller, so we
+        never load an unbounded backlog. Returns the number of records
+        loaded for caller visibility / tests.
+
+        Inline query (kept here per Q1 scope: do NOT add new DB modules).
+        """
+        import datetime as dt
+
+        from sqlalchemy import select
+
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=float(hours))
+        loaded: list[TradeRecord] = []
+        try:
+            with session_scope() as s:
+                q = (
+                    select(TradeLog)
+                    .where(TradeLog.created_at >= cutoff)
+                    .order_by(TradeLog.id.desc())
+                    .limit(int(max_rows))
+                )
+                rows = list(s.scalars(q).all())
+                # Re-sort ascending so trade_history reads oldest-first, the
+                # same invariant the live append path maintains.
+                rows.reverse()
+                for r in rows:
+                    ts = r.created_at.isoformat() if r.created_at else utc_now_iso()
+                    loaded.append(
+                        TradeRecord(
+                            order_id=str(r.order_id or ""),
+                            market_question=str(r.market_question or ""),
+                            condition_id=str(r.condition_id or ""),
+                            token_id=str(r.token_id or ""),
+                            side=str(r.side or ""),
+                            price=float(r.price or 0.0),
+                            size=float(r.size or 0.0),
+                            cost_usd=float(r.cost_usd or 0.0),
+                            status=str(r.status or ""),
+                            timestamp=ts,
+                            outcome=str(r.outcome or ""),
+                            strategy=str(r.strategy or ""),
+                            reconcile_note=r.reconcile_note,
+                        )
+                    )
+        except Exception as e:
+            log.warning("load_recent_trades query failed: %s", e)
+            return 0
+        self.state.trade_history = loaded
+        log.info("load_recent_trades: rehydrated %d trades from DB (window=%.1fh, cap=%d)",
+                 len(loaded), float(hours), int(max_rows))
+        return len(loaded)
 
     async def refresh_balance(self):
         """Refresh USDC balance from Polygon RPCs.
@@ -616,7 +689,7 @@ class TradingBot:
         copy_scheduled = bool(self.settings.agent_copy and self.settings.copy_watch_wallets)
         if copy_scheduled:
             agent_tasks.append(("copy_signal", asyncio.ensure_future(
-                self._copy_agent.propose(self._http))))
+                self._copy_agent.propose(self._http, state=self.state))))
 
         tasks = [t for _, t in agent_tasks]
         results = await asyncio.gather(*tasks, return_exceptions=True)
