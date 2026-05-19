@@ -1258,10 +1258,45 @@ class TradingBot:
                 except Exception as pe:
                     log.warning("DB paper trade log: %s", pe)
 
-        try:
-            await asyncio.to_thread(_persist)
-        except Exception as e:
-            log.warning("DB trade log: %s", e)
+        # E10b: persist-after-success is critical. A successful live order
+        # that fails to persist becomes invisible to the DB but visible to
+        # the exchange — dedupe / rolling-notional / reconcile all break.
+        # One-time retry with a short backoff; if both fail we promote to
+        # ERROR, append a structured error, and bump a counter so the
+        # operator can see the cycle was degraded (the cycle itself must
+        # NOT crash — other orders may have already succeeded).
+        persist_ok = False
+        last_exc: Optional[BaseException] = None
+        for attempt in (1, 2):
+            try:
+                await asyncio.to_thread(_persist)
+                persist_ok = True
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt == 1:
+                    await asyncio.sleep(0.1)
+        if not persist_ok:
+            err_tag = f"persist_failed:order_id={oid}"
+            self.state.errors.append(err_tag)
+            log.error(
+                "DB trade log FAILED after retry (order_id=%s) — trade visible on exchange but NOT in DB",
+                oid,
+                exc_info=last_exc,
+            )
+            try:
+                current = int(getattr(self.state, "persist_failures", 0) or 0)
+                setattr(self.state, "persist_failures", current + 1)
+            except Exception:
+                pass
+            slog(
+                log,
+                self.settings.structured_log,
+                "persist_failed",
+                order_id=str(oid)[:24],
+                strategy=intent.strategy,
+                error=str(last_exc)[:200] if last_exc else "",
+            )
 
         return True
 
