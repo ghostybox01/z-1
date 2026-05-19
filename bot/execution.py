@@ -108,6 +108,84 @@ def _extract_post_order_id(resp: Any) -> Optional[str]:
     return None
 
 
+def _find_matching_open_order(
+    client: Any,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    window_s: int = 60,
+) -> Tuple[Optional[str], str]:
+    """
+    Ghost-order detection helper (E6).
+
+    Query CLOB for open orders matching the intent fingerprint
+    (token_id + side + price + size). The `window_s` argument is reserved
+    for future timestamp-bound filtering; the CLOB `get_orders` endpoint
+    currently returns the live open-order set, which is already a tight
+    upper bound on what could have leaked through a malformed post_order
+    response. We perform exactly one query (no retry) and return:
+
+        (oid, "exact")     - exactly one fingerprint-exact open order
+        (None, "ambiguous") - >1 exact matches, or one near-miss
+        (None, "none")      - no match (caller falls through to no_order_id)
+
+    "Near-miss" means same token+side but price or size disagree within a
+    small tolerance — we deliberately refuse to claim ownership in that
+    case rather than risk attributing somebody else's order to this intent.
+    """
+    try:
+        rows = client.get_orders()
+    except Exception as e:
+        log.warning("ghost-order query failed: %s", e)
+        return None, "none"
+
+    if not isinstance(rows, list):
+        return None, "none"
+
+    side_u = (side or "").upper()
+    price_tol = 1e-4   # ~0.01c — CLOB quantizes to 0.001
+    size_tol_rel = 0.001  # 0.1%
+
+    exact: list[str] = []
+    near: list[str] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        tok = r.get("asset_id") or r.get("token_id") or r.get("tokenId")
+        if not tok or str(tok) != str(token_id):
+            continue
+        rside = str(r.get("side") or "").upper()
+        if rside != side_u:
+            continue
+        try:
+            rprice = float(r.get("price"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            rsize = float(r.get("original_size") or r.get("size") or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+        oid = r.get("id") or r.get("orderID") or r.get("order_id")
+        if not oid:
+            continue
+        oid_s = str(oid)
+
+        size_tol = max(size_tol_rel * max(abs(size), abs(rsize)), 1e-6)
+        if abs(rprice - float(price)) <= price_tol and abs(rsize - float(size)) <= size_tol:
+            exact.append(oid_s)
+        else:
+            # Same token+side, different price or size -> ambiguous near-miss
+            near.append(oid_s)
+
+    if len(exact) == 1 and not near:
+        return exact[0], "exact"
+    if len(exact) > 1 or (exact and near) or (not exact and near):
+        return None, "ambiguous"
+    return None, "none"
+
+
 def _poll_order_state(client: Any, oid: str) -> tuple[str, str]:
     """
     Returns (kind, detail) where kind is:
@@ -248,7 +326,46 @@ async def place_limit_gtd_then_wait(
         oid = _extract_post_order_id(resp)
         if not oid:
             log.error("post_order missing id: %s", resp)
-            return None, "post_failed:no_order_id"
+            # Ghost-order detection (E6): the post response was malformed but
+            # the order may already be live on-chain. Do exactly one CLOB
+            # open-orders query and try to attribute by fingerprint.
+            recovered_id, match_kind = _find_matching_open_order(
+                client,
+                token_id=token_id,
+                side=side,
+                price=float(price),
+                size=float(size),
+                window_s=60,
+            )
+            if match_kind == "exact" and recovered_id:
+                log.warning(
+                    "ghost-order recovered: oid=%s token=%s side=%s price=%.4f size=%.4f",
+                    recovered_id,
+                    token_id[:12],
+                    side,
+                    float(price),
+                    float(size),
+                )
+                # Return immediately with the recovered id and a distinctive
+                # note. The standard reconcile loop
+                # (reconcile_trade_records_inplace) will poll get_order on
+                # this id and resolve the final status — we do not enter the
+                # local polling loop because we have no confidence in the
+                # TTL/expiration we requested (the post response was
+                # malformed) and the recovered order's lifecycle is now
+                # owned by the exchange's GTD timer, not ours.
+                return recovered_id, "post_recovered_via_query"
+            elif match_kind == "ambiguous":
+                log.warning(
+                    "ghost-order ambiguous: multiple/near-miss candidates token=%s side=%s price=%.4f size=%.4f — refusing to attribute",
+                    token_id[:12],
+                    side,
+                    float(price),
+                    float(size),
+                )
+                return None, "post_ambiguous"
+            else:
+                return None, "post_failed:no_order_id"
     finally:
         if idem_key is not None:
             _INFLIGHT_KEYS.discard(idem_key)
