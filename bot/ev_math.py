@@ -78,11 +78,13 @@ def compute_ev(
         result.time_discount = discount
         adjusted_ev_per_share *= discount
 
-    shares = size_usd / max(entry_price, 0.01)
+    # clamp matches gate threshold at line 58 (>0.001) so a valid market doesn't get inflated share count
+    shares = size_usd / max(entry_price, 0.001)
     result.absolute_expected_profit_usd = adjusted_ev_per_share * shares
 
     # Gate checks
-    ev_bps = (adjusted_ev_per_share / max(entry_price, 0.01)) * 10000.0
+    # clamp matches gate threshold at line 58 (>0.001) so a valid market doesn't get inflated share count
+    ev_bps = (adjusted_ev_per_share / max(entry_price, 0.001)) * 10000.0
 
     if min_ev_bps > 0 and ev_bps < min_ev_bps:
         result.reason = f"ev_{ev_bps:.1f}bps_lt_{min_ev_bps:.0f}"

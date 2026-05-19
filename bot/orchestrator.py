@@ -977,6 +977,90 @@ class TradingBot:
                 log.warning("reconcile: %s", e)
                 self.state.errors.append(f"reconcile:{e}")
 
+    def _resolve_fill_price(
+        self,
+        *,
+        oid: Optional[str],
+        note: str,
+        status: str,
+        limit_price: float,
+        limit_size: float,
+    ) -> tuple[float, float, str]:
+        """E9 fix #11: extract the actual fill price (or VWAP across partials)
+        so TradeRecord stores cost-basis truth, not the limit price.
+
+        Returns (price, size, price_source). price_source is a short tag that
+        is appended to TradeRecord.strategy so the dashboard / reconciler can
+        tell whether a record is final (filled / market_fok) or still pending
+        (limit_pending) and treat P&L accordingly.
+        """
+        # Paper realism encodes the simulated fill price inline in the note
+        # like "dry_run:paper_filled@0.4856_slip=50bps". Parse it out so the
+        # paper portfolio doesn't book the limit as the fill.
+        nlow = (note or "").lower()
+        if status == "dry_run_filled" and "paper_filled@" in nlow:
+            try:
+                tail = nlow.split("paper_filled@", 1)[1]
+                # stop at first non-numeric / non-dot char
+                buf = []
+                for ch in tail:
+                    if ch.isdigit() or ch == ".":
+                        buf.append(ch)
+                    else:
+                        break
+                if buf:
+                    fp = float("".join(buf))
+                    if fp > 0:
+                        return fp, limit_size, "paper_fill"
+            except Exception:
+                pass
+            return limit_price, limit_size, "paper_fill_parse_failed"
+
+        if status in ("dry_run",):
+            return limit_price, limit_size, "dry_run"
+
+        # Live: try to read the actual fill from the order record. Filled
+        # GTD and market_fok both populate size_matched; if we can recover
+        # an exec price field we use it, otherwise VWAP back-solving from
+        # the response isn't reliable so we fall back to the limit price
+        # with an explicit tag.
+        if status in ("filled", "market_fok") and self.clob is not None and oid:
+            try:
+                raw = self.clob.get_order(oid)
+            except Exception as e:
+                log.debug("fill-price get_order %s failed: %s", str(oid)[:16], e)
+                raw = None
+            if isinstance(raw, dict):
+                src = raw.get("order") if isinstance(raw.get("order"), dict) else raw
+                # Some CLOB shapes expose an average / executed price directly.
+                for k in ("average_price", "avg_price", "averagePrice", "executed_price", "price"):
+                    v = src.get(k) if isinstance(src, dict) else None
+                    if v is None and isinstance(raw, dict):
+                        v = raw.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        fp = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fp <= 0:
+                        continue
+                    sm = None
+                    try:
+                        from bot.clob_utils import normalize_order_payload
+                        sm = normalize_order_payload(raw).get("size_matched")
+                    except Exception:
+                        sm = None
+                    filled_size = float(sm) if (sm is not None and sm > 0) else limit_size
+                    return fp, filled_size, ("fok_fill" if status == "market_fok" else "gtd_fill")
+            # No usable fill price recoverable — record the limit but tag.
+            return limit_price, limit_size, ("fok_unknown" if status == "market_fok" else "gtd_fill_unknown")
+
+        # All other statuses (cancelled, submitted, closed without fill, etc.):
+        # the limit price is the only number we have, and any P&L computed
+        # against it should be treated as provisional.
+        return limit_price, limit_size, "limit_pending"
+
     async def _execute_intent(self, intent: TradeIntent) -> bool:
         if not self.settings.dry_run and self.clob is None:
             self.state.errors.append("exec:no_clob_for_live_trade")
@@ -992,6 +1076,33 @@ class TradingBot:
         price = round(min(max(price, tick), 1.0 - tick), 6)
         size_shares = round(intent.size_usd / price, 2)
         if size_shares < 1.0:
+            # E9 fix #10: a forced 1-share floor can spend more than the
+            # intent's USD budget when the per-share price is high relative
+            # to intent.size_usd. Reject (with a 5% tolerance) instead of
+            # silently over-spending; otherwise, allow the 1-share floor.
+            cost_if_one_share = price * 1.0
+            if cost_if_one_share > intent.size_usd * 1.05:
+                msg = (
+                    f"intent_too_small token={intent.token_id[:12]} "
+                    f"price={price:.4f} intent_usd={intent.size_usd:.2f} "
+                    f"one_share_cost={cost_if_one_share:.4f}"
+                )
+                log.warning(msg)
+                slog(
+                    log,
+                    self.settings.structured_log,
+                    "intent_too_small",
+                    strategy=intent.strategy,
+                    agent=intent.agent,
+                    token=intent.token_id[:12],
+                    price=round(price, 4),
+                    intent_usd=round(intent.size_usd, 2),
+                    one_share_cost=round(cost_if_one_share, 4),
+                )
+                self.state.errors.append(
+                    f"intent_too_small:{intent.strategy}:price={price:.4f}:intent_usd={intent.size_usd:.2f}"
+                )
+                return False
             size_shares = 1.0
 
         oid, note = await place_limit_gtd_then_wait(
@@ -1061,6 +1172,18 @@ class TradingBot:
             elif str(note2).startswith("market_fok_failed"):
                 self.state.errors.append(f"market_fallback:{note2}")
 
+        # E9 fix #11: record the actual fill price (or VWAP across partial
+        # fills) instead of the limit price when execution data is available.
+        # Falls back to the limit price tagged with price_source=limit_pending
+        # when fill data isn't reachable (e.g. order still open / GTD pending).
+        recorded_price, recorded_size, price_source = self._resolve_fill_price(
+            oid=oid,
+            note=note,
+            status=status,
+            limit_price=price,
+            limit_size=size_shares,
+        )
+
         ts = utc_now_iso()
         rec = TradeRecord(
             order_id=oid or "none",
@@ -1068,13 +1191,13 @@ class TradingBot:
             condition_id=intent.condition_id,
             token_id=intent.token_id,
             side=intent.side,
-            price=price,
-            size=size_shares,
-            cost_usd=round(price * size_shares, 2),
+            price=recorded_price,
+            size=recorded_size,
+            cost_usd=round(recorded_price * recorded_size, 2),
             status=status,
             timestamp=ts,
             outcome=intent.outcome,
-            strategy=f"{intent.strategy}:{note}",
+            strategy=f"{intent.strategy}:{note}|price_source={price_source}",
         )
         self.state.trade_history.append(rec)
         self.state.trades_placed += 1
@@ -1086,9 +1209,9 @@ class TradingBot:
                 market=intent.question,
                 outcome=intent.outcome,
                 side=intent.side,
-                price=price,
-                shares=size_shares,
-                cost_usd=round(price * size_shares, 2),
+                price=recorded_price,
+                shares=recorded_size,
+                cost_usd=round(recorded_price * recorded_size, 2),
                 timestamp=ts,
                 strategy=intent.strategy,
             )
@@ -1111,9 +1234,9 @@ class TradingBot:
                 condition_id=intent.condition_id,
                 token_id=intent.token_id,
                 side=intent.side,
-                price=price,
-                size=size_shares,
-                cost_usd=round(price * size_shares, 2),
+                price=recorded_price,
+                size=recorded_size,
+                cost_usd=round(recorded_price * recorded_size, 2),
                 status=status,
                 strategy=rec.strategy,
                 outcome=intent.outcome,
@@ -1125,7 +1248,7 @@ class TradingBot:
                         order_id=str(oid),
                         token_id=intent.token_id,
                         entry_price=price,
-                        fill_price=price if status == "dry_run_filled" else 0.0,
+                        fill_price=recorded_price if status == "dry_run_filled" else 0.0,
                         slippage_bps=0.0,
                         fill_probability=0.0,
                         filled=status == "dry_run_filled",
