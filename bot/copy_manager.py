@@ -30,6 +30,11 @@ log = logging.getLogger("polymarket.copy_manager")
 # How often to re-scan leaderboard (seconds). Default: every 6 hours.
 _DEFAULT_REFRESH_INTERVAL = 6 * 3600
 
+# E14c: maximum age of a cached wallet-quality stat before we MUST re-check
+# rather than reuse. Prevents the prune path from reusing day-old stats for
+# a wallet whose performance has just cratered.
+_CACHE_TTL_SECONDS = 600.0
+
 
 @dataclass
 class WalletStats:
@@ -225,7 +230,15 @@ class CopyManager:
             if st.status != "active":
                 continue
 
-            if st.last_checked and (now - st.last_checked) < skip_if_checked_within_s:
+            # E14c: only reuse cached stats if both the discovery-window
+            # heuristic AND a hard TTL still consider them fresh. Stale stats
+            # silently kept wallets active long after performance dropped.
+            cache_fresh = (
+                st.last_checked
+                and (now - st.last_checked) < skip_if_checked_within_s
+                and (now - st.last_checked) < _CACHE_TTL_SECONDS
+            )
+            if cache_fresh:
                 total = int(st.wins + st.losses)
                 if total >= min_trades and st.win_rate < prune_threshold:
                     st.status = "pruned"

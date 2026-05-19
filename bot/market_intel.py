@@ -3,7 +3,20 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from typing import Any, Optional
+
+
+# E14h: numeric timestamps from Gamma come in either seconds or milliseconds.
+# A naive threshold of 1e12 (≈ year 33658 in seconds) cleanly separates
+# millis-since-epoch from seconds-since-epoch today, but Unix seconds will
+# cross this around year 33658 — not 2033 as one might guess from a
+# *binary* 2^31 cliff. The 2033 risk is a 32-bit time_t overflow, which is
+# unrelated to this parser but worth flagging since the magic number used
+# to be the only thing standing between the parser and a 1970 datetime.
+# The threshold is configurable via MARKET_INTEL_MS_THRESHOLD so the
+# default can be lowered (e.g. for tests) without a code change.
+_MS_THRESHOLD = float(os.environ.get("MARKET_INTEL_MS_THRESHOLD", "1e12") or 1e12)
 
 
 def _raw_dict(market: dict[str, Any]) -> dict[str, Any]:
@@ -24,7 +37,9 @@ def hours_until_resolution_end(market: dict[str, Any]) -> Optional[float]:
             candidates.append(v)
     now = dt.datetime.now(dt.timezone.utc)
     for v in candidates:
-        if isinstance(v, (int, float)) and v > 1e12:
+        # Treat numerics above the configured threshold as milliseconds; the
+        # legacy magic `1e12` is now `_MS_THRESHOLD` (env-overridable).
+        if isinstance(v, (int, float)) and v > _MS_THRESHOLD:
             try:
                 end = dt.datetime.fromtimestamp(float(v) / 1000.0, tz=dt.timezone.utc)
                 return (end - now).total_seconds() / 3600.0

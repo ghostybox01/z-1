@@ -79,6 +79,10 @@ class TradingBot:
         self._zscore_agent = ZScoreEdgeAgent(self.settings)
         self._copy_manager = CopyManager(self.settings)
         self._paper_portfolio = PaperPortfolio()
+        # E14b: per-cycle token guard. Cleared at the top of run_cycle so
+        # repeat-intent storms (multiple agents firing on the same token in
+        # the same cycle) cannot place duplicate orders.
+        self._cycle_inflight_tokens: set[str] = set()
 
         w = self.settings.wallet_address
         log.info(
@@ -445,7 +449,7 @@ class TradingBot:
                 reconcile_trade_records_inplace,
                 self.clob,
                 self.state.trade_history,
-                depth=self.settings.reconcile_history_depth,
+                depth=self._bounded_reconcile_depth(),
                 sleep_between_s=self.settings.reconcile_poll_sleep_s,
             )
             self.state.reconcile_updates_last = n
@@ -584,9 +588,15 @@ class TradingBot:
                 cat_new[c] = cat_new.get(c, 0.0) + float(it.size_usd)
         if cat_new:
             global_cap = float(getattr(self.settings, "max_category_exposure_usd", 0.0) or 0.0)
-            over_caps = dict(getattr(self.settings, "category_exposure_caps", {}) or {})
+            # E14d: normalize cap keys defensively. Settings.from_kv already
+            # lower-cases keys, but operators editing the DB directly can
+            # introduce upper-case overrides (e.g. "SPORTS"). Normalise both
+            # sides so a cap row never silently no-ops.
+            raw_over_caps = dict(getattr(self.settings, "category_exposure_caps", {}) or {})
+            over_caps = {str(k).strip().lower(): v for k, v in raw_over_caps.items()}
             for c, add_u in cat_new.items():
-                cap = float(over_caps.get(c, 0.0) or 0.0)
+                c_key = str(c).strip().lower()
+                cap = float(over_caps.get(c_key, 0.0) or 0.0)
                 if cap <= 0:
                     cap = global_cap
                 if cap <= 0:
@@ -613,9 +623,21 @@ class TradingBot:
                     return False, f"spread_{bps:.0f}_bps_gt_{self.settings.max_spread_bps}"
         return True, "ok"
 
-    def _note_exec_result(self, ok: bool) -> None:
+    # E14e: cap reconcile depth at a safety floor — operators occasionally
+    # configure a huge value that causes the per-cycle reconcile call to
+    # spam the CLOB. 200 is the documented maximum reconcile lookback.
+    _RECONCILE_DEPTH_MAX = 200
+
+    def _bounded_reconcile_depth(self) -> int:
+        return min(int(self.settings.reconcile_history_depth or 0), self._RECONCILE_DEPTH_MAX)
+
+    def _note_exec_result(self, ok: bool, *, is_dry_run: bool = False) -> None:
+        # E14a: do NOT reset the live circuit breaker on a dry-run success.
+        # Otherwise a string of paper trades would silently clear failures
+        # accrued against the live exchange, defeating the safety stop.
         if ok:
-            self.state.consecutive_exec_failures = 0
+            if not is_dry_run:
+                self.state.consecutive_exec_failures = 0
         else:
             self.state.consecutive_exec_failures = int(self.state.consecutive_exec_failures or 0) + 1
 
@@ -749,6 +771,12 @@ class TradingBot:
         if not self.clob and not self.settings.dry_run:
             return
         log.info("——— cycle start ———")
+        # E14b/g: reset per-cycle guards before any settings reload / scan.
+        self._cycle_inflight_tokens = set()
+        try:
+            self.state.reserved_usdc = 0.0
+        except Exception:
+            pass
         await self._reload_settings_async()
         slog(
             log,
@@ -972,12 +1000,19 @@ class TradingBot:
                         skipped.append({"agent": a.agent, "strategy": f"{a.strategy}+{b.strategy}", "question": a.question[:80], "reason": adv_r})
                         continue
                     need = a.size_usd + b.size_usd + reserve
-                    if self.state.usdc_balance < need:
-                        log.info("skip bundle: insufficient balance (need %.2f incl. buffer)", need)
+                    # E14g: subtract any in-flight reservations from this cycle.
+                    effective_balance = self.state.usdc_balance - float(
+                        getattr(self.state, "reserved_usdc", 0.0) or 0.0
+                    )
+                    if effective_balance < need:
+                        log.info(
+                            "skip bundle: insufficient balance (need %.2f incl. buffer, effective %.2f)",
+                            need, effective_balance,
+                        )
                         continue
                     ok1 = await self._execute_intent(a)
                     if not ok1:
-                        self._note_exec_result(False)
+                        self._note_exec_result(False, is_dry_run=self.settings.dry_run)
                         continue
                     rolling_n += float(a.size_usd)
                     if a.condition_id:
@@ -985,7 +1020,7 @@ class TradingBot:
                     acat = str(a.category.value).lower()
                     category_extra[acat] = category_extra.get(acat, 0.0) + float(a.size_usd)
                     ok2 = await self._execute_intent(b)
-                    self._note_exec_result(bool(ok2))
+                    self._note_exec_result(bool(ok2), is_dry_run=self.settings.dry_run)
                     if ok2:
                         rolling_n += float(b.size_usd)
                         if b.condition_id:
@@ -1050,12 +1085,18 @@ class TradingBot:
                     skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": adv_r})
                     continue
                 need = intent.size_usd + reserve
-                if self.state.usdc_balance < need:
-                    log.info("skip: insufficient balance (need %.2f incl. buffer)", need)
+                effective_balance = self.state.usdc_balance - float(
+                    getattr(self.state, "reserved_usdc", 0.0) or 0.0
+                )
+                if effective_balance < need:
+                    log.info(
+                        "skip: insufficient balance (need %.2f incl. buffer, effective %.2f)",
+                        need, effective_balance,
+                    )
                     continue
 
                 ok_ex = await self._execute_intent(intent)
-                self._note_exec_result(ok_ex)
+                self._note_exec_result(ok_ex, is_dry_run=self.settings.dry_run)
                 if ok_ex:
                     rolling_n += float(intent.size_usd)
                     if intent.condition_id:
@@ -1096,7 +1137,7 @@ class TradingBot:
                     reconcile_trade_records_inplace,
                     self.clob,
                     self.state.trade_history,
-                    depth=self.settings.reconcile_history_depth,
+                    depth=self._bounded_reconcile_depth(),
                     sleep_between_s=self.settings.reconcile_poll_sleep_s,
                 )
                 self.state.reconcile_updates_last = n
@@ -1200,6 +1241,48 @@ class TradingBot:
         if not self.settings.dry_run and self.clob is None:
             self.state.errors.append("exec:no_clob_for_live_trade")
             return False
+        # E14b: skip duplicate-token placements within a single cycle.
+        # Without this guard, two agents (e.g. value_edge + copy_signal)
+        # firing on the same token would each submit, doubling exposure.
+        token_key = str(intent.token_id or "").strip()
+        if token_key and token_key in getattr(self, "_cycle_inflight_tokens", set()):
+            log.warning(
+                "same_cycle_duplicate_token_skipped token=%s strategy=%s",
+                token_key[:12], intent.strategy,
+            )
+            slog(
+                log,
+                self.settings.structured_log,
+                "same_cycle_duplicate_token_skipped",
+                token=token_key[:12],
+                strategy=intent.strategy,
+                agent=intent.agent,
+            )
+            return False
+        if token_key:
+            try:
+                self._cycle_inflight_tokens.add(token_key)
+            except Exception:
+                pass
+        # E14g: reserve USDC against the in-flight intent so concurrent
+        # legs in the same cycle don't both see the full balance.
+        reserved_added = False
+        try:
+            current_reserved = float(getattr(self.state, "reserved_usdc", 0.0) or 0.0)
+            setattr(self.state, "reserved_usdc", current_reserved + float(intent.size_usd))
+            reserved_added = True
+        except Exception:
+            pass
+
+        def _release_reservation() -> None:
+            if not reserved_added:
+                return
+            try:
+                cur = float(getattr(self.state, "reserved_usdc", 0.0) or 0.0)
+                setattr(self.state, "reserved_usdc", max(0.0, cur - float(intent.size_usd)))
+            except Exception:
+                pass
+
         await self._rate_limit()
         tick = 0.01
         if self.clob:
@@ -1237,6 +1320,7 @@ class TradingBot:
                 self.state.errors.append(
                     f"intent_too_small:{intent.strategy}:price={price:.4f}:intent_usd={intent.size_usd:.2f}"
                 )
+                _release_reservation()
                 return False
             size_shares = 1.0
 
@@ -1264,6 +1348,7 @@ class TradingBot:
                 strategy=intent.strategy,
                 note=str(note)[:200],
             )
+            _release_reservation()
             return False
 
         status = "unknown"
@@ -1334,22 +1419,35 @@ class TradingBot:
             outcome=intent.outcome,
             strategy=f"{intent.strategy}:{note}|price_source={price_source}",
         )
+        # E14f: trade_history append and paper_portfolio.record_fill must
+        # not split-brain. If the paper record fails AFTER the trade row was
+        # appended, roll back the append so the in-memory view matches the
+        # paper portfolio (and the dashboard doesn't show a phantom trade).
         self.state.trade_history.append(rec)
+        history_appended = True
         self.state.trades_placed += 1
-
-        if self.settings.dry_run and status in ("dry_run", "dry_run_filled"):
-            self._paper_portfolio.record_fill(
-                token_id=intent.token_id,
-                condition_id=intent.condition_id,
-                market=intent.question,
-                outcome=intent.outcome,
-                side=intent.side,
-                price=recorded_price,
-                shares=recorded_size,
-                cost_usd=round(recorded_price * recorded_size, 2),
-                timestamp=ts,
-                strategy=intent.strategy,
+        try:
+            if self.settings.dry_run and status in ("dry_run", "dry_run_filled"):
+                self._paper_portfolio.record_fill(
+                    token_id=intent.token_id,
+                    condition_id=intent.condition_id,
+                    market=intent.question,
+                    outcome=intent.outcome,
+                    side=intent.side,
+                    price=recorded_price,
+                    shares=recorded_size,
+                    cost_usd=round(recorded_price * recorded_size, 2),
+                    timestamp=ts,
+                    strategy=intent.strategy,
+                )
+        except Exception as paper_exc:
+            log.warning(
+                "paper_portfolio.record_fill failed — rolling back trade_history append (oid=%s): %s",
+                str(oid)[:24], paper_exc,
             )
+            if history_appended and self.state.trade_history and self.state.trade_history[-1] is rec:
+                self.state.trade_history.pop()
+            self.state.trades_placed = max(0, int(self.state.trades_placed) - 1)
         self.state.last_trade = rec.timestamp
         log.info("Executed %s -> %s %s", intent.strategy, oid, note)
         slog(
@@ -1433,6 +1531,8 @@ class TradingBot:
                 error=str(last_exc)[:200] if last_exc else "",
             )
 
+        # E14g: order is now persisted (or attempted) — release the reservation.
+        _release_reservation()
         return True
 
     async def run_forever(self):
