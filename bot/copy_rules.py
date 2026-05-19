@@ -1,4 +1,36 @@
-"""Reusable copy-trading candidate extraction and filter rules."""
+"""Reusable copy-trading candidate extraction and filter rules.
+
+----------------------------------------------------------------------
+SCORING WEIGHT DIVERGENCE — v1 (fallback) vs v2 (primary)
+----------------------------------------------------------------------
+The two scorers weight DIFFERENT component sets, so a silent flip from
+v2 to v1 reshuffles wallet rankings unpredictably. This is intentional
+divergence (v2 is a richer model), not a bug — but operators must see
+it. Task 12 / E11 wires the `scoring_mode` flag and a degraded-mode
+rate-limit hint so flips are observable and risk-bounded.
+
+v2 (primary; see bot/wallet_scoring.py:232-240 — `wallet_score_v2`):
+    raw = 0.25 * weighted_cat_score   # category-aware skill
+        + 0.15 * timing               # entry-price quality
+        + 0.10 * consistency          # diversification balance
+        + 0.20 * activity_factor      # log-scaled trade count
+        + 0.10 * known_outcome        # yes/no outcome ratio
+        + 0.10 * sane_price           # 0.05..0.95 price ratio
+        + 0.10 * size                 # median trade-size factor
+    Then shrunk by Bayesian sample penalty and time-decay multiplier.
+
+v1 (fallback; see this file, `wallet_score` after the except branch):
+    score = 0.40 * activity_factor
+          + 0.25 * known_outcome
+          + 0.20 * sane_price
+          + 0.15 * size_factor
+
+v1 has NO cat_skill, NO timing, NO consistency, NO decay, NO Bayesian
+shrinkage. It over-weights raw activity (40% vs 20%). DO NOT modify
+either vector here — both are load-bearing. Add new behavior at the
+selection layer (degraded-mode rate-limit) instead.
+----------------------------------------------------------------------
+"""
 
 from __future__ import annotations
 
@@ -147,6 +179,14 @@ def limit_price_with_buffer(settings: Any, px: float) -> float:
     return round(min(px * (1.0 + pad_bps / 10000.0), 0.99), 4)
 
 
+# Degraded-mode sizing multiplier (E11). When the v2 scorer is unavailable
+# and v1 is silently scoring wallets with a different weight vector (see the
+# module docstring), we reduce per-trade size by this factor to bound risk
+# from the unknown ranking shift. Surfaced via the components dict under
+# "rate_limit_mult"; the copy_signal agent applies it at sizing time.
+DEGRADED_MODE_SIZE_MULTIPLIER = 0.5
+
+
 def wallet_score(
     rows: list[dict[str, Any]],
     *,
@@ -161,25 +201,39 @@ def wallet_score(
     Phase 2: delegates to wallet_score_v2 when available, providing category-aware
     skill, timing quality, consistency, sample-size Bayesian shrinkage, and decay.
     Falls back to v1 heuristic if v2 import/runtime fails. Fallbacks emit a
-    WARNING log line and, when ``state`` is provided, increment
-    ``state.scoring_fallback_v1`` so operators can see silent v1 usage.
+    WARNING log line and, when ``state`` is provided:
+      - increment ``state.scoring_fallback_v1`` (silent-v1 counter, from T8),
+      - set ``state.scoring_mode = "degraded"`` (E11 visibility flag),
+      - return a ``rate_limit_mult`` < 1.0 in the components dict so the
+        copy_signal agent rate-limits new positions while in degraded mode.
 
-    TODO(Task 12): wire ``state`` through from CopySignalAgent and admin_api so
-    the counter is always populated. Currently most callers do not pass state
-    and only the warning log fires. See bot/agents/copy_signal.py:70 and
-    bot/web/admin_api.py:631.
+    On v2 success ``state.scoring_mode`` is reaffirmed as ``"v2"`` and
+    ``rate_limit_mult`` is 1.0.
+
+    The returned components dict shape differs between v2 (rich keys) and
+    v1 (n/outcome/price/size), so callers should treat unexpected keys as
+    optional. ``rate_limit_mult`` is always present.
     """
     try:
         from bot.wallet_scoring import wallet_score_v2
         score, result = wallet_score_v2(
             rows, wallet=wallet, default_bet_usd=default_bet_usd, settings=settings,
         )
-        return score, result.components
+        # E11: reaffirm v2 mode on success (default is "v2" but a prior
+        # fallback in this process may have flipped it to "degraded").
+        if state is not None:
+            setattr(state, "scoring_mode", "v2")
+        components = dict(result.components)
+        components.setdefault("rate_limit_mult", 1.0)
+        return score, components
     except Exception as e:
         log.warning("scoring fallback: %s", e, exc_info=True)
         if state is not None:
             # getattr/setattr in case Task 1 hasn't landed the field yet.
             setattr(state, "scoring_fallback_v1", getattr(state, "scoring_fallback_v1", 0) + 1)
+            # E11: flip the visible mode flag so dashboard/operators see
+            # that ranking has degraded to the v1 weight vector.
+            setattr(state, "scoring_mode", "degraded")
 
     # V1 fallback
     cands: list[CopyCandidate] = []
@@ -189,7 +243,13 @@ def wallet_score(
             cands.append(c)
     n = len(cands)
     if n == 0:
-        return 0.0, {"n": 0.0, "outcome": 0.0, "price": 0.0, "size": 0.0}
+        return 0.0, {
+            "n": 0.0,
+            "outcome": 0.0,
+            "price": 0.0,
+            "size": 0.0,
+            "rate_limit_mult": DEGRADED_MODE_SIZE_MULTIPLIER,
+        }
 
     known_outcome = sum(1 for c in cands if c.outcome in ("yes", "no")) / n
     sane_price = sum(1 for c in cands if 0.05 <= c.price <= 0.95) / n
@@ -209,4 +269,5 @@ def wallet_score(
         "outcome": known_outcome,
         "price": sane_price,
         "size": size_factor,
+        "rate_limit_mult": DEGRADED_MODE_SIZE_MULTIPLIER,
     }

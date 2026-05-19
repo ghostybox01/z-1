@@ -34,7 +34,10 @@ class CopySignalAgent:
     def is_cold_start(self) -> bool:
         return self._cold_start
 
-    async def propose(self, http: httpx.AsyncClient) -> list[TradeIntent]:
+    async def propose(self, http: httpx.AsyncClient, state: Any = None) -> list[TradeIntent]:
+        # E11 (Task 12): ``state`` threads through to wallet_score so the
+        # scoring_fallback_v1 counter and scoring_mode flag are populated
+        # on every call. Optional to preserve test/legacy callers.
         if not self.settings.agent_copy or not self.settings.copy_watch_wallets:
             self.last_note = "disabled or no wallets configured"
             return []
@@ -72,7 +75,11 @@ class CopySignalAgent:
                 wallet=wallet,
                 default_bet_usd=float(self.settings.default_bet_usd),
                 settings=self.settings,
+                state=state,
             )
+            # E11: when v2 unavailable, parts carries rate_limit_mult < 1.0
+            # so we cut sizing on the produced intents.
+            rate_limit_mult = float(parts.get("rate_limit_mult", 1.0) or 1.0)
             min_score = float(getattr(self.settings, "copy_min_wallet_score", 0.0) or 0.0)
             if score < min_score:
                 log.info(
@@ -108,7 +115,8 @@ class CopySignalAgent:
                     candidates_market_capped += 1
                     continue
                 max_px = limit_price_with_buffer(self.settings, c.price)
-                usdc = max(self.settings.min_bet_usd, min(self.settings.max_bet_usd, c.usdc))
+                usdc_raw = c.usdc * rate_limit_mult
+                usdc = max(self.settings.min_bet_usd, min(self.settings.max_bet_usd, usdc_raw))
                 cond = str(entry.get("conditionId") or entry.get("condition_id") or "")
                 try:
                     cat = MarketCategory(c.category)

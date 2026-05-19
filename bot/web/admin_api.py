@@ -633,6 +633,7 @@ async def admin_copy_preview(
             wallet=w,
             default_bet_usd=float(getattr(s, "default_bet_usd", 5.0)),
             settings=s,
+            state=getattr(bot, "state", None),
         )
         out: list[dict[str, Any]] = []
         for entry in rows if isinstance(rows, list) else []:
@@ -674,7 +675,7 @@ async def _intents_preview_core(bot: Any, agent: str, limit: int) -> dict[str, A
     if not bot.clob:
         # In dry-run without keys, only copy agent can propose intents.
         if agent in ("all", "copy_signal") and bot.settings.agent_copy and bot.settings.copy_watch_wallets:
-            copy_intents = await bot._copy_agent.propose(bot._http)
+            copy_intents = await bot._copy_agent.propose(bot._http, state=getattr(bot, "state", None))
             lim = max(1, min(int(limit or 80), 250))
             out = [
                 {
@@ -720,7 +721,7 @@ async def _intents_preview_core(bot: Any, agent: str, limit: int) -> dict[str, A
         tasks.append(bot._value_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
     if agent in ("all", "copy_signal") and bot.settings.agent_copy and bot.settings.copy_watch_wallets:
         labels.append("copy_signal")
-        tasks.append(bot._copy_agent.propose(bot._http))
+        tasks.append(bot._copy_agent.propose(bot._http, state=getattr(bot, "state", None)))
     if agent in ("all", "latency_arb") and bot.settings.agent_latency:
         labels.append("latency_arb")
         tasks.append(bot._latency_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
