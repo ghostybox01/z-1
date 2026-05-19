@@ -79,6 +79,19 @@ class BotState:
     last_skipped_intents: list[dict] = field(default_factory=list)
     # Per-agent runtime diagnostics from last cycle (keyed by agent id).
     cycle_agent_runtime: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # E1: snapshot of the three risk caps actually enforced by the orchestrator,
+    # populated once at TradingBot init (orchestrator uses cap>0 as enable).
+    # Dashboard reads this to show what's truly active even if DB settings change.
+    active_caps: dict[str, float] = field(default_factory=dict)
+    # Pre-added for downstream captains (E-series). Default cleanly; populated elsewhere.
+    # Scoring fallback counter (HMS Scoring).
+    scoring_fallback_v1: int = 0
+    # Scoring mode label, e.g. "v2" or "v1_fallback" (HMS Scoring).
+    scoring_mode: str = "v2"
+    # Unix timestamp of last successful balance refresh (HMS Execution).
+    balance_refreshed_at: float = 0.0
+    # In-cycle USDC reservation to avoid double-spend across legs (HMS Execution).
+    reserved_usdc: float = 0.0
 
 
 def utc_now_iso() -> str:

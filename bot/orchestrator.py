@@ -47,7 +47,13 @@ class TradingBot:
 
     def __init__(self):
         self.settings = Settings.load()
+        # E1: hard-fail boot when risk caps are zero unless operator opted in
+        # via risk_caps_disabled=True. Runs BEFORE any trading-loop wiring so
+        # the bot cannot enter run_forever with unbounded exposure by accident.
+        self.settings.validate_risk_caps_at_startup()
         self.state = BotState(mode="dry_run" if self.settings.dry_run else "live")
+        # E1: snapshot the caps actually enforced so the dashboard can render them.
+        self.state.active_caps = self.settings.active_risk_caps()
         self.clob: Optional[ClobClient] = None
         self._running = False
         self._last_api = 0.0
@@ -85,6 +91,9 @@ class TradingBot:
             return
         self.settings = new_settings
         self.state.mode = "dry_run" if self.settings.dry_run else "live"
+        # Keep dashboard snapshot of enforced caps in sync with current settings.
+        # Eval semantics in _advanced_gates_ok are unchanged (still cap>0 enables).
+        self.state.active_caps = self.settings.active_risk_caps()
         self._value_agent.settings = self.settings
         self._copy_agent.settings = self.settings
         self._latency_agent.settings = self.settings

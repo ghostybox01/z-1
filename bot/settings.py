@@ -139,6 +139,7 @@ def default_kv_seed() -> dict[str, str]:
         "max_daily_notional_usd": "0",
         "daily_notional_window_hours": "24",
         "circuit_breaker_max_fails": "0",
+        "risk_caps_disabled": "false",
         # Phase 2: wallet scoring
         "wallet_score_decay_half_life_hours": "168",
         # Phase 2: EV-aware trade gating
@@ -274,6 +275,11 @@ class Settings:
     max_daily_notional_usd: float = 0.0
     daily_notional_window_hours: float = 24.0
     circuit_breaker_max_fails: int = 0
+    # Safety: explicit opt-in to run without risk caps (E1).
+    # When False (default), startup validation REQUIRES non-zero caps on
+    # max_condition_exposure_usd / max_category_exposure_usd / max_daily_notional_usd
+    # because cap<=0 disables the corresponding eval gate (see orchestrator._advanced_gates_ok).
+    risk_caps_disabled: bool = False
 
     # Phase 2: wallet scoring
     wallet_score_decay_half_life_hours: float = 168.0
@@ -483,6 +489,7 @@ class Settings:
             max_daily_notional_usd=_f(g("max_daily_notional_usd", "0"), 0.0),
             daily_notional_window_hours=_f(g("daily_notional_window_hours", "24"), 24.0),
             circuit_breaker_max_fails=_i(g("circuit_breaker_max_fails", "0"), 0),
+            risk_caps_disabled=_b(g("risk_caps_disabled", "false"), False),
             # Phase 2
             wallet_score_decay_half_life_hours=_f(g("wallet_score_decay_half_life_hours", "168"), 168.0),
             ev_gate_enabled=_b(g("ev_gate_enabled", "false"), False),
@@ -530,6 +537,42 @@ class Settings:
                 raise
             _log.debug("Settings.load fallback (no DB engine): %s", exc)
         return cls.from_kv(default_kv_seed(), merge_os_environ=True)
+
+    def active_risk_caps(self) -> dict[str, float]:
+        """Return the trio of caps actually enforced by orchestrator gates.
+
+        Mirrors the cap-keys whose `> 0` value enables the corresponding gate in
+        `orchestrator._advanced_gates_ok`. Surfaced on BotState.active_caps so the
+        dashboard can render what's truly in effect.
+        """
+        return {
+            "max_condition_exposure_usd": float(self.max_condition_exposure_usd or 0.0),
+            "max_category_exposure_usd": float(self.max_category_exposure_usd or 0.0),
+            "max_daily_notional_usd": float(self.max_daily_notional_usd or 0.0),
+        }
+
+    def validate_risk_caps_at_startup(self) -> None:
+        """Hard-fail boot if risk caps are disabled by default (E1).
+
+        Eval semantics in `orchestrator._advanced_gates_ok` treat `cap > 0` as the
+        enable check and `cap <= 0` as "gate disabled" — meaning the bot trades
+        with unbounded exposure. The intended config requires explicit non-zero
+        caps for all three gates; operators who really want to run without caps
+        must set `risk_caps_disabled=True` to confirm.
+
+        Raises:
+            ValueError: when any of the three caps is <= 0 and
+                ``risk_caps_disabled`` is not True. Message is exact (callers
+                may match on it).
+        """
+        if self.risk_caps_disabled:
+            return
+        caps = self.active_risk_caps()
+        if any(v <= 0 for v in caps.values()):
+            raise ValueError(
+                "Risk caps disabled: set explicit non-zero caps or "
+                "risk_caps_disabled=True to confirm"
+            )
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -594,6 +637,7 @@ class Settings:
             "max_daily_notional_usd": self.max_daily_notional_usd,
             "daily_notional_window_hours": self.daily_notional_window_hours,
             "circuit_breaker_max_fails": self.circuit_breaker_max_fails,
+            "risk_caps_disabled": self.risk_caps_disabled,
             # Phase 2
             "wallet_score_decay_half_life_hours": self.wallet_score_decay_half_life_hours,
             "ev_gate_enabled": self.ev_gate_enabled,
