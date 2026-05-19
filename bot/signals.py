@@ -11,6 +11,10 @@ from sqlalchemy import or_, select
 
 from bot.db.models import ArticleSignal, session_scope
 
+# Symmetric sentiment factor: same magnitude for positive and negative sentiment
+# to avoid systematic long bias. Midpoint of previous asymmetric values (0.06, 0.08).
+SENTIMENT_FACTOR = 0.07
+
 
 @dataclass
 class SignalView:
@@ -64,10 +68,10 @@ def intent_signal_boost(question: str) -> tuple[float, str]:
         strength = min(1.0, 0.15 * len(overlap)) * float(sig.weight or 1.0)
         sent = max(-1.0, min(1.0, float(sig.sentiment or 0.0)))
         if sent >= 0.15:
-            m = 1.0 + 0.08 * strength * sent
+            m = 1.0 + SENTIMENT_FACTOR * strength * sent
             note = f"signal+:{sig.title[:40]}"
         elif sent <= -0.15:
-            m = 1.0 - 0.06 * strength * abs(sent)
+            m = 1.0 - SENTIMENT_FACTOR * strength * abs(sent)
             note = f"signal-:{sig.title[:40]}"
         else:
             m = 1.0
