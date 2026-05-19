@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.exceptions import PolyApiException
@@ -14,6 +15,48 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from bot.clob_utils import is_filled_status, is_open_status, is_terminal_status, normalize_order_payload
 
 log = logging.getLogger("polymarket.execution")
+
+
+# Process-local in-flight idempotency keys. Each submit attempt adds its key
+# before posting and removes it after the response (success OR failure). A
+# duplicate call within the same time bucket will see the key still present
+# and short-circuit before re-posting — this is our client-side defense
+# against network-timeout-induced double-submits.
+_INFLIGHT_KEYS: set[str] = set()
+
+
+def _intent_idempotency_key(
+    intent: Mapping[str, Any] | Any,
+    time_bucket: int = 60,
+) -> str:
+    """
+    Deterministic idempotency key derived from
+        (intent_id, token_id, side, size_usd, price, time_bucket_NNs)
+
+    `intent` may be a mapping (dict-like) or any object exposing those
+    attributes. Missing fields fall back to empty strings so a same-intent
+    re-call still hashes identically. The time bucket coarsens wall-clock
+    time so a retry inside the bucket window collides; outside it, a fresh
+    key is produced.
+    """
+    def _get(name: str) -> Any:
+        if isinstance(intent, Mapping):
+            return intent.get(name)
+        return getattr(intent, name, None)
+
+    bucket = max(1, int(time_bucket))
+    bucket_idx = int(time.time()) // bucket
+
+    parts = [
+        str(_get("intent_id") or _get("id") or ""),
+        str(_get("token_id") or ""),
+        str(_get("side") or "").upper(),
+        f"{float(_get('size_usd') or 0.0):.6f}",
+        f"{float(_get('price') or 0.0):.6f}",
+        str(bucket_idx),
+    ]
+    raw = "|".join(parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _simulate_paper_fill(
@@ -102,11 +145,39 @@ async def place_limit_gtd_then_wait(
     paper_realism_enabled: bool = True,
     paper_slippage_model_bps: float = 50.0,
     follower_latency_ms: float = 500.0,
+    intent: Any = None,
+    idempotency_time_bucket: int = 60,
 ) -> Tuple[Optional[str], str]:
     """
     Post GTD limit; poll until filled / terminal / TTL; cancel if still open.
     Returns (order_id_or_none, note).
+
+    When `intent` is supplied, a deterministic idempotency key is computed and
+    a process-local in-flight set blocks duplicate submits within the time
+    bucket. py_clob_client has no server-side idempotency hook, so this is
+    purely client-side dedupe.
     """
+    idem_key: Optional[str] = None
+    if intent is not None:
+        # Build the key from the intent + the call-site overrides so the
+        # actual posted parameters are reflected in the hash.
+        intent_for_key = dict(intent) if isinstance(intent, Mapping) else {
+            "intent_id": getattr(intent, "intent_id", None) or getattr(intent, "id", None),
+        }
+        intent_for_key.setdefault("token_id", token_id)
+        intent_for_key.setdefault("side", side)
+        intent_for_key.setdefault("price", price)
+        intent_for_key.setdefault("size_usd", float(price) * float(size))
+        idem_key = _intent_idempotency_key(intent_for_key, time_bucket=idempotency_time_bucket)
+        if idem_key in _INFLIGHT_KEYS:
+            log.warning(
+                "submit blocked: idempotency_inflight key=%s token=%s side=%s",
+                idem_key,
+                token_id[:12],
+                side,
+            )
+            return None, "idempotency_inflight"
+
     if dry_run:
         paper_result = _simulate_paper_fill(
             token_id=token_id,
@@ -145,28 +216,42 @@ async def place_limit_gtd_then_wait(
         expiration=exp,
     )
 
+    if idem_key is not None:
+        _INFLIGHT_KEYS.add(idem_key)
+        log.info(
+            "submit key=%s token=%s side=%s price=%.4f size=%.4f",
+            idem_key,
+            token_id[:12],
+            side,
+            float(price),
+            float(size),
+        )
     try:
-        signed = client.create_order(args)
-    except PolyApiException as e:
-        log.warning("create_order PolyApiException: %s", e)
-        return None, f"create_failed:poly_api:{e.status_code}:{e.error_msg}"
-    except Exception as e:
-        log.exception("create_order failed")
-        return None, f"create_failed:{e}"
+        try:
+            signed = client.create_order(args)
+        except PolyApiException as e:
+            log.warning("create_order PolyApiException: %s", e)
+            return None, f"create_failed:poly_api:{e.status_code}:{e.error_msg}"
+        except Exception as e:
+            log.exception("create_order failed")
+            return None, f"create_failed:{e}"
 
-    try:
-        resp = client.post_order(signed, OrderType.GTD)
-    except PolyApiException as e:
-        log.warning("post_order PolyApiException: %s", e)
-        return None, f"post_failed:poly_api:{e.status_code}:{e.error_msg}"
-    except Exception as e:
-        log.exception("post_order failed")
-        return None, f"post_failed:{e}"
+        try:
+            resp = client.post_order(signed, OrderType.GTD)
+        except PolyApiException as e:
+            log.warning("post_order PolyApiException: %s", e)
+            return None, f"post_failed:poly_api:{e.status_code}:{e.error_msg}"
+        except Exception as e:
+            log.exception("post_order failed")
+            return None, f"post_failed:{e}"
 
-    oid = _extract_post_order_id(resp)
-    if not oid:
-        log.error("post_order missing id: %s", resp)
-        return None, "post_failed:no_order_id"
+        oid = _extract_post_order_id(resp)
+        if not oid:
+            log.error("post_order missing id: %s", resp)
+            return None, "post_failed:no_order_id"
+    finally:
+        if idem_key is not None:
+            _INFLIGHT_KEYS.discard(idem_key)
 
     kind0, detail0 = await asyncio.to_thread(_poll_order_state, client, oid)
     if kind0 == "filled":
@@ -214,7 +299,28 @@ async def place_market_fok_fallback(
     side: str,
     amount_usd: float,
     dry_run: bool,
+    intent: Any = None,
+    idempotency_time_bucket: int = 60,
 ) -> Tuple[Optional[str], str]:
+    idem_key: Optional[str] = None
+    if intent is not None:
+        intent_for_key = dict(intent) if isinstance(intent, Mapping) else {
+            "intent_id": getattr(intent, "intent_id", None) or getattr(intent, "id", None),
+        }
+        intent_for_key.setdefault("token_id", token_id)
+        intent_for_key.setdefault("side", side)
+        intent_for_key.setdefault("price", 0.0)
+        intent_for_key.setdefault("size_usd", float(amount_usd))
+        idem_key = _intent_idempotency_key(intent_for_key, time_bucket=idempotency_time_bucket)
+        if idem_key in _INFLIGHT_KEYS:
+            log.warning(
+                "market submit blocked: idempotency_inflight key=%s token=%s side=%s",
+                idem_key,
+                token_id[:12],
+                side,
+            )
+            return None, "idempotency_inflight"
+
     if dry_run:
         return f"dry_mkt_{int(time.time())}", "dry_run"
 
@@ -222,12 +328,26 @@ async def place_market_fok_fallback(
 
     order_side = BUY if side.upper() == "BUY" else SELL
     mo = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=order_side)
+
+    if idem_key is not None:
+        _INFLIGHT_KEYS.add(idem_key)
+        log.info(
+            "submit key=%s token=%s side=%s amount_usd=%.4f kind=market_fok",
+            idem_key,
+            token_id[:12],
+            side,
+            float(amount_usd),
+        )
     try:
-        signed = client.create_market_order(mo)
-        resp = client.post_order(signed, OrderType.FOK)
-    except PolyApiException as e:
-        return None, f"market_fok_failed:poly_api:{e.status_code}:{e.error_msg}"
-    except Exception as e:
-        return None, f"market_fok_failed:{e}"
-    oid = _extract_post_order_id(resp)
-    return oid, "market_fok"
+        try:
+            signed = client.create_market_order(mo)
+            resp = client.post_order(signed, OrderType.FOK)
+        except PolyApiException as e:
+            return None, f"market_fok_failed:poly_api:{e.status_code}:{e.error_msg}"
+        except Exception as e:
+            return None, f"market_fok_failed:{e}"
+        oid = _extract_post_order_id(resp)
+        return oid, "market_fok"
+    finally:
+        if idem_key is not None:
+            _INFLIGHT_KEYS.discard(idem_key)
