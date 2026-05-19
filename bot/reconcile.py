@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Optional
 
 from bot.clob_utils import is_filled_status, is_open_status, is_terminal_status, normalize_order_payload
 
 log = logging.getLogger("polymarket.reconcile")
+
+
+# Defense-in-depth: serialize the mutation loop in reconcile_trade_records_inplace.
+# Today's call pattern is single-threaded (orchestrator runs reconcile inside its
+# serial cycle), so this lock is uncontended in production. If a future caller
+# parallelises reconcile across a shared record list — e.g. an out-of-band
+# dashboard "force reconcile" button firing while the orchestrator cycle runs —
+# the lock prevents two passes from interleaving status writes on the same row.
+_RECONCILE_LOCK = threading.Lock()
 
 
 def normalize_open_order(raw: Any) -> dict[str, Any]:
@@ -187,68 +197,91 @@ def reconcile_trade_records_inplace(
         return 0
     slice_ = records[-depth:] if len(records) > depth else records
     updated = 0
-    for rec in slice_:
-        oid = getattr(rec, "order_id", "") or ""
-        if not oid or oid == "none" or oid.startswith("dry_"):
-            continue
-        st0 = getattr(rec, "status", "")
-        if st0 == "dry_run":
-            continue
-        try:
-            raw = clob.get_order(oid)
-        except Exception as e:
-            log.debug("get_order %s: %s", oid[:16], e)
-            time.sleep(sleep_between_s)
-            continue
+    # Take the module-level lock around the mutation loop. Today's call
+    # pattern is single-threaded (orchestrator cycle is serial), so this is
+    # defense-in-depth against a future parallel/out-of-band caller racing
+    # on the same record list.
+    with _RECONCILE_LOCK:
+        for rec in slice_:
+            oid = getattr(rec, "order_id", "") or ""
+            if not oid or oid == "none" or oid.startswith("dry_"):
+                continue
+            st0 = getattr(rec, "status", "")
+            if st0 == "dry_run":
+                continue
+            try:
+                raw = clob.get_order(oid)
+            except Exception as e:
+                log.debug("get_order %s: %s", oid[:16], e)
+                time.sleep(sleep_between_s)
+                continue
 
-        norm = normalize_order_payload(raw)
-        raw_status = norm["status"]
-        sm = norm["size_matched"]
-        osz = norm["original_size"]
-        api_st = canonical_status_from_order_payload(raw)
-        merged = merge_trade_status(st0, api_st)
+            norm = normalize_order_payload(raw)
+            raw_status = norm["status"]
+            sm = norm["size_matched"]
+            osz = norm["original_size"]
 
-        # Detect partial-fill + cancel: the canonical status was promoted to
-        # "filled" because size_matched > 0, but the underlying CLOB status
-        # was a cancel. We must record both the fill and the cancel of the
-        # remainder so neither event is dropped.
-        is_partial_cancel = (
-            raw_status in ("CANCELED", "CANCELLED", "EXPIRED")
-            and sm is not None and sm > 0
-            and (osz is None or sm < osz * 0.999)
-        )
-
-        if merged and merged != st0:
-            rec.status = merged
-            if is_partial_cancel:
-                remainder = (osz - sm) if (osz is not None and sm is not None) else None
-                rec.reconcile_note = (
-                    f"clob:partial_fill_cancelled:size_matched={sm}"
-                    + (f";cancelled_remainder={remainder}" if remainder is not None else "")
-                )
-            else:
-                rec.reconcile_note = f"clob:{api_st}"
-            updated += 1
-        else:
-            # No status change. Either a no-op or a rejected downgrade —
-            # the merge function already logged a debug for downgrades.
-            # For partial-cancel where status was already "filled" we still
-            # want to enrich the note with the cancel-of-remainder fact.
-            if is_partial_cancel and st0 == "filled" and not getattr(rec, "reconcile_note", None):
-                remainder = (osz - sm) if (osz is not None and sm is not None) else None
-                rec.reconcile_note = (
-                    f"clob:partial_fill_cancelled:size_matched={sm}"
-                    + (f";cancelled_remainder={remainder}" if remainder is not None else "")
-                )
-            if api_st != st0 and merged is None:
-                # Explicit per-order log of the rejected transition for
-                # debugging stale-snapshot incidents.
+            # Normalize None size_matched to 0. Rationale: if the CLOB
+            # payload arrives without a size_matched field we treat it as
+            # "no fill observed" (the conservative choice for partial-fill
+            # detection); we deliberately do NOT treat None as "missing
+            # data" — that would silently skip the partial-fill check and
+            # lose fill events. Log at DEBUG when this normalization fires
+            # so we can spot a misbehaving upstream payload.
+            if sm is None:
                 log.debug(
-                    "reconcile: rejected %s -> %s for order %s",
-                    st0,
-                    api_st,
+                    "reconcile: size_matched=None for order %s — normalizing to 0",
                     oid[:16],
                 )
+                sm = 0
 
-        time.sleep(sleep_between_s)
+            api_st = canonical_status_from_order_payload(raw)
+            merged = merge_trade_status(st0, api_st)
+
+            # Detect partial-fill + cancel: a CANCELLED order with sm > 0
+            # is a partial-fill+cancel ONLY if sm is strictly less than osz
+            # (or osz is unknown). A cancel observed AFTER a full fill
+            # (sm == osz) is already handled by terminal-absorbing logic
+            # in merge_trade_status — we don't tag it as partial-cancel.
+            # Strict less-than replaces the previous arbitrary `< 0.999`
+            # tolerance, which misclassified a 99.9% fill as partial-cancel.
+            is_partial_cancel = (
+                raw_status in ("CANCELED", "CANCELLED", "EXPIRED")
+                and sm > 0
+                and (osz is None or sm < osz)
+            )
+
+            if merged and merged != st0:
+                rec.status = merged
+                if is_partial_cancel:
+                    remainder = (osz - sm) if (osz is not None) else None
+                    rec.reconcile_note = (
+                        f"clob:partial_fill_cancelled:size_matched={sm}"
+                        + (f";cancelled_remainder={remainder}" if remainder is not None else "")
+                    )
+                else:
+                    rec.reconcile_note = f"clob:{api_st}"
+                updated += 1
+            else:
+                # No status change. Either a no-op or a rejected downgrade —
+                # the merge function already logged a debug for downgrades.
+                # For partial-cancel where status was already "filled" we still
+                # want to enrich the note with the cancel-of-remainder fact.
+                if is_partial_cancel and st0 == "filled" and not getattr(rec, "reconcile_note", None):
+                    remainder = (osz - sm) if (osz is not None) else None
+                    rec.reconcile_note = (
+                        f"clob:partial_fill_cancelled:size_matched={sm}"
+                        + (f";cancelled_remainder={remainder}" if remainder is not None else "")
+                    )
+                if api_st != st0 and merged is None:
+                    # Explicit per-order log of the rejected transition for
+                    # debugging stale-snapshot incidents.
+                    log.debug(
+                        "reconcile: rejected %s -> %s for order %s",
+                        st0,
+                        api_st,
+                        oid[:16],
+                    )
+
+            time.sleep(sleep_between_s)
     return updated
