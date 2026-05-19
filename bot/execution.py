@@ -19,33 +19,42 @@ log = logging.getLogger("polymarket.execution")
 
 # Process-local in-flight idempotency keys. Each submit attempt adds its key
 # before posting and removes it after the response (success OR failure). A
-# duplicate call within the same time bucket will see the key still present
-# and short-circuit before re-posting — this is our client-side defense
-# against network-timeout-induced double-submits.
+# duplicate call while the key is still present (i.e. a concurrent retry)
+# short-circuits before re-posting — this is our client-side defense against
+# network-timeout-induced double-submits.
 _INFLIGHT_KEYS: set[str] = set()
 
 
 def _intent_idempotency_key(
     intent: Mapping[str, Any] | Any,
-    time_bucket: int = 60,
+    time_bucket: int = 60,  # deprecated/unused; kept for call-site compatibility
 ) -> str:
     """
     Deterministic idempotency key derived from
-        (intent_id, token_id, side, size_usd, price, time_bucket_NNs)
+        (intent_id, token_id, side, size_usd, price)
 
     `intent` may be a mapping (dict-like) or any object exposing those
     attributes. Missing fields fall back to empty strings so a same-intent
-    re-call still hashes identically. The time bucket coarsens wall-clock
-    time so a retry inside the bucket window collides; outside it, a fresh
-    key is produced.
+    re-call still hashes identically.
+
+    NOTE: the key intentionally does NOT include a wall-clock time bucket
+    (the `time_bucket` arg is kept for backward compatibility but unused).
+    A time bucket created a boundary race — retries straddling the bucket
+    boundary (e.g. t=59.9s and t=60.1s with bucket=60s) computed DIFFERENT
+    keys and both proceeded. The intent_id is already a stable per-intent
+    identifier, so the in-flight set's release-on-response semantics are
+    sufficient: while a submit is outstanding the key sits in
+    `_INFLIGHT_KEYS`; once the response (success OR failure) returns, the
+    key is discarded. A genuine re-submit of the same intent in a later
+    cycle is rare and the caller should mint a fresh intent_id.
     """
     def _get(name: str) -> Any:
         if isinstance(intent, Mapping):
             return intent.get(name)
         return getattr(intent, name, None)
 
-    bucket = max(1, int(time_bucket))
-    bucket_idx = int(time.time()) // bucket
+    # time_bucket kept in signature for source compatibility; not used.
+    _ = time_bucket
 
     parts = [
         str(_get("intent_id") or _get("id") or ""),
@@ -53,7 +62,6 @@ def _intent_idempotency_key(
         str(_get("side") or "").upper(),
         f"{float(_get('size_usd') or 0.0):.6f}",
         f"{float(_get('price') or 0.0):.6f}",
-        str(bucket_idx),
     ]
     raw = "|".join(parts).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
@@ -255,6 +263,15 @@ async def place_limit_gtd_then_wait(
                 side,
             )
             return None, "idempotency_inflight"
+    else:
+        # Opt-in observability: callers that omit `intent` get no client-side
+        # idempotency protection. Emit a WARNING so operators can spot the
+        # gap. Behavior is preserved (no raise) — this is purely diagnostic.
+        log.warning(
+            "submit_without_idempotency_protection token=%s side=%s",
+            token_id[:12],
+            side,
+        )
 
     if dry_run:
         paper_result = _simulate_paper_fill(
@@ -437,6 +454,14 @@ async def place_market_fok_fallback(
                 side,
             )
             return None, "idempotency_inflight"
+    else:
+        # Opt-in observability: WARNING when caller skipped idempotency
+        # protection (see place_limit_gtd_then_wait for rationale).
+        log.warning(
+            "submit_without_idempotency_protection token=%s side=%s",
+            token_id[:12],
+            side,
+        )
 
     if dry_run:
         return f"dry_mkt_{int(time.time())}", "dry_run"
