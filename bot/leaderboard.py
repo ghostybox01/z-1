@@ -145,6 +145,9 @@ async def analyze_wallet_quality(
             win_pnls.append(pnl)
         else:
             losses += 1
+            # Promote current win-streak into max_streak BEFORE zeroing it;
+            # otherwise W-W-W-L would record max_streak=0.
+            max_streak = max(max_streak, cur_streak)
             cur_streak = 0
             loss_pnls.append(pnl)
 
