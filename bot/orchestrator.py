@@ -619,6 +619,130 @@ class TradingBot:
         else:
             self.state.consecutive_exec_failures = int(self.state.consecutive_exec_failures or 0) + 1
 
+    async def _unwind_bundle_leg(self, leg: TradeIntent, fill_info: Any) -> None:
+        """E4: Unwind a surviving bundle leg whose partner failed.
+
+        First attempt: cancel the leg's outstanding order. If the order is
+        already filled (or cancel fails), place an offsetting market order on
+        the opposite side sized to the filled amount.
+
+        On success, append `bundle_unwound:order_id=<oid>` to state.errors so
+        operators see the exceptional event. On failure, append
+        `bundle_unwind_failed:order_id=<oid>`, log at ERROR, and trip the
+        circuit breaker via `consecutive_exec_failures` AND set
+        `state.unwind_failure_critical = True` so the dashboard surfaces it.
+
+        Behaviour is only invoked from the bundle branch when the
+        `bundle_auto_unwind_enabled` flag is True — caller guards this.
+        """
+        oid = getattr(fill_info, "order_id", None) or "unknown"
+        filled_size = float(getattr(fill_info, "size", 0.0) or 0.0)
+        status = str(getattr(fill_info, "status", "") or "")
+        log.info(
+            "bundle_unwind start oid=%s token=%s side=%s filled_size=%.4f status=%s",
+            str(oid)[:24], str(leg.token_id)[:12], leg.side, filled_size, status,
+        )
+
+        cancel_ok = False
+        cancel_err: Optional[str] = None
+        # Step 1: cancel the resting order (if any). Filled/closed statuses
+        # short-circuit straight to the offset path.
+        if self.clob is not None and oid and oid != "unknown" and status not in (
+            "filled", "dry_run_filled", "market_fok", "closed"
+        ):
+            try:
+                res = await asyncio.to_thread(self.clob.cancel, oid)
+                # CLOB's cancel may return either a dict or a primitive ack;
+                # treat absence-of-error as success, but inspect for an
+                # explicit "already filled" signal to fall through to offset.
+                already = False
+                if isinstance(res, dict):
+                    nlow = json.dumps(res).lower()
+                    already = "filled" in nlow and "already" in nlow
+                if already:
+                    cancel_err = "already_filled"
+                else:
+                    cancel_ok = True
+                    log.info("bundle_unwind cancel ok oid=%s", str(oid)[:24])
+            except Exception as e:
+                cancel_err = f"{type(e).__name__}:{e}"
+                log.info("bundle_unwind cancel failed oid=%s err=%s", str(oid)[:24], cancel_err)
+        else:
+            cancel_err = "no_clob_or_already_filled"
+
+        if cancel_ok:
+            self.state.errors.append(f"bundle_unwound:order_id={oid}")
+            slog(
+                log,
+                self.settings.structured_log,
+                "bundle_unwound",
+                order_id=str(oid)[:24],
+                strategy=leg.strategy,
+                action="cancel",
+            )
+            return
+
+        # Step 2: cancel did not work (or the order had already filled). Place
+        # an offsetting market order opposite the original side, sized to the
+        # filled amount in shares (notional ≈ filled_size * leg.max_price).
+        opp_side = "SELL" if leg.side.upper() == "BUY" else "BUY"
+        # Estimate USD using the recorded fill price when available; otherwise
+        # fall back to the leg's limit price.
+        ref_price = float(getattr(fill_info, "price", 0.0) or leg.max_price or 0.0)
+        amount_usd = max(0.0, filled_size * ref_price) if ref_price > 0 else float(leg.size_usd)
+
+        try:
+            oid2, note2 = await place_market_fok_fallback(
+                self.clob,
+                token_id=leg.token_id,
+                side=opp_side,
+                amount_usd=amount_usd,
+                dry_run=self.settings.dry_run,
+            )
+        except Exception as e:
+            oid2, note2 = None, f"offset_exception:{type(e).__name__}:{e}"
+
+        if oid2 and not str(note2).startswith("market_fok_failed"):
+            self.state.errors.append(f"bundle_unwound:order_id={oid}")
+            log.info(
+                "bundle_unwind offset ok oid=%s offset_oid=%s note=%s",
+                str(oid)[:24], str(oid2)[:24], str(note2)[:120],
+            )
+            slog(
+                log,
+                self.settings.structured_log,
+                "bundle_unwound",
+                order_id=str(oid)[:24],
+                offset_order_id=str(oid2)[:24],
+                strategy=leg.strategy,
+                action="offset",
+            )
+            return
+
+        # Step 3: both cancel and offset failed. Trip the circuit breaker
+        # and surface a critical flag so the operator must intervene.
+        self.state.errors.append(f"bundle_unwind_failed:order_id={oid}")
+        try:
+            setattr(self.state, "unwind_failure_critical", True)
+        except Exception:
+            pass
+        cb_max = int(getattr(self.settings, "circuit_breaker_max_fails", 0) or 0)
+        if cb_max > 0:
+            self.state.consecutive_exec_failures = cb_max + 1
+        log.error(
+            "bundle_unwind FAILED oid=%s cancel_err=%s offset_note=%s — leg unhedged, operator action required",
+            str(oid)[:24], cancel_err, str(note2)[:200],
+        )
+        slog(
+            log,
+            self.settings.structured_log,
+            "bundle_unwind_failed",
+            order_id=str(oid)[:24],
+            strategy=leg.strategy,
+            cancel_err=str(cancel_err)[:120],
+            offset_note=str(note2)[:120],
+        )
+
     async def run_cycle(self):
         if not self._http:
             return
@@ -874,6 +998,17 @@ class TradingBot:
                     else:
                         log.warning("bundle partial: second leg failed after first submitted")
                         self.state.errors.append("bundle_partial_second_failed")
+                        # E4: leg A is live and unhedged. When the flag is ON
+                        # we cancel-or-offset the surviving leg. Default OFF
+                        # so live behaviour is unchanged until operators flip
+                        # the flag — see Settings.bundle_auto_unwind_enabled.
+                        if getattr(self.settings, "bundle_auto_unwind_enabled", False):
+                            fill_info_a = (
+                                self.state.trade_history[-1]
+                                if self.state.trade_history
+                                else None
+                            )
+                            await self._unwind_bundle_leg(a, fill_info_a)
                     continue
 
                 intent = unit[0]

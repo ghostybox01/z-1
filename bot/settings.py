@@ -162,6 +162,8 @@ def default_kv_seed() -> dict[str, str]:
         # Phase 2: paper execution realism
         "paper_realism_enabled": "true",
         "paper_slippage_model_bps": "50",
+        # E4: bundle partial-fill auto-unwind. Default OFF — operator opt-in.
+        "bundle_auto_unwind_enabled": "false",
         # Telegram notifications
         "telegram_bot_token": "",
         "telegram_chat_id": "",
@@ -312,6 +314,12 @@ class Settings:
     # Phase 2: paper execution realism
     paper_realism_enabled: bool = True
     paper_slippage_model_bps: float = 50.0
+
+    # E4: when True, partial bundle fills are unwound automatically.
+    # Default OFF — manual unwind only. Flipping this changes live behaviour
+    # (the bot will cancel or offset the surviving leg) so operators must
+    # opt in explicitly.
+    bundle_auto_unwind_enabled: bool = False
 
     # Telegram notifications
     telegram_bot_token: str = ""
@@ -516,6 +524,7 @@ class Settings:
             follower_latency_ms=_f(g("follower_latency_ms", "500"), 500.0),
             paper_realism_enabled=_b(g("paper_realism_enabled", "true"), True),
             paper_slippage_model_bps=_f(g("paper_slippage_model_bps", "50"), 50.0),
+            bundle_auto_unwind_enabled=_b(g("bundle_auto_unwind_enabled", "false"), False),
             telegram_bot_token=g("telegram_bot_token", ""),
             telegram_chat_id=g("telegram_chat_id", ""),
             telegram_enabled=_b(g("telegram_enabled", "false"), False),
@@ -665,4 +674,5 @@ class Settings:
             "follower_latency_ms": self.follower_latency_ms,
             "paper_realism_enabled": self.paper_realism_enabled,
             "paper_slippage_model_bps": self.paper_slippage_model_bps,
+            "bundle_auto_unwind_enabled": self.bundle_auto_unwind_enabled,
         }
