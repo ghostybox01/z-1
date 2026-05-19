@@ -42,6 +42,17 @@ from bot.validate import is_valid_polygon_address, is_valid_private_key_hex
 log = logging.getLogger("polymarket.orchestrator")
 
 
+class BalanceRefreshError(RuntimeError):
+    """Raised by refresh_balance() when all configured RPCs fail to return
+    a usable USDC balance for the current cycle.
+
+    E2: callers (run_cycle) MUST catch this and abort the cycle — trading on
+    a stale balance after a withdrawal or RPC outage is unsafe.
+    """
+
+    pass
+
+
 class TradingBot:
     """Production-style bot with category toggles, agents, and GTD execution."""
 
@@ -159,10 +170,23 @@ class TradingBot:
         return True
 
     async def refresh_balance(self):
+        """Refresh USDC balance from Polygon RPCs.
+
+        E2: If *all* configured RPCs fail (or return no usable balance) we
+        raise BalanceRefreshError so the caller can abort the cycle rather
+        than trading on a stale `state.usdc_balance` (which would be
+        catastrophic after a withdrawal or RPC outage). A single RPC failure
+        with a working fallback still succeeds — we only escalate when the
+        whole pool is dark.
+        """
         if not self.settings.wallet_address or not self._http:
             if self.settings.dry_run and self.state.usdc_balance <= 0:
                 self.state.usdc_balance = self.settings.default_bet_usd * 100
                 log.info("DRY RUN: no wallet configured, using simulated balance $%.2f", self.state.usdc_balance)
+            # Treat "no wallet configured" as a non-failure path: the dry-run
+            # simulated balance is authoritative, so stamp it so observers see
+            # the refresh succeeded for this cycle.
+            self.state.balance_refreshed_at = time.time()
             return
         payload = {
             "jsonrpc": "2.0",
@@ -177,18 +201,28 @@ class TradingBot:
                 "latest",
             ],
         }
-        for url in (
+        rpc_urls = (
             "https://polygon-bor-rpc.publicnode.com",
             "https://rpc.ankr.com/polygon",
-        ):
+        )
+        last_error: Optional[str] = None
+        for url in rpc_urls:
             try:
                 r = await self._http.post(url, json=payload)
                 res = r.json().get("result", "0x0")
                 if res and res != "0x":
                     self.state.usdc_balance = int(res, 16) / 1e6
+                    self.state.balance_refreshed_at = time.time()
                     return
-            except Exception:
+                # RPC responded but with an empty/invalid balance — record
+                # and let the next RPC try.
+                last_error = f"{url}:empty_result"
+            except Exception as e:
+                last_error = f"{url}:{type(e).__name__}"
                 continue
+        # All RPCs failed (raised or returned no usable balance). Do NOT
+        # silently continue with stale state.usdc_balance — surface to caller.
+        raise BalanceRefreshError(f"dual_rpc_failure:{last_error or 'unknown'}")
 
     def _find_market_by_token(self, token_id: str) -> Optional[dict]:
         for _, market in self._market_cache.items():
@@ -542,7 +576,20 @@ class TradingBot:
             except Exception as e:
                 log.warning("CopyManager refresh error: %s", e)
 
-        await self.refresh_balance()
+        # E2: Dual-RPC balance failure must abort the cycle so we do not
+        # trade on a stale phantom balance after a withdrawal / RPC outage.
+        try:
+            await self.refresh_balance()
+        except BalanceRefreshError as e:
+            log.warning("balance_refresh_failed: %s — aborting cycle", e)
+            self.state.errors.append("balance_refresh_failed")
+            slog(
+                log,
+                self.settings.structured_log,
+                "balance_refresh_failed",
+                reason=str(e)[:200],
+            )
+            return
         await self.refresh_positions()
 
         reserve = max(0.0, float(self.settings.balance_buffer_usd))
