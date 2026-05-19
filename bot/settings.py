@@ -150,6 +150,10 @@ def default_kv_seed() -> dict[str, str]:
         "ev_fee_bps": "0",
         "ev_time_discount_rate": "0.05",
         "ev_max_hours_to_resolution": "0",
+        # Execution fee fallback (E10a): used by bot.execution when the live
+        # CLOB get_fee_rate_bps call fails after one retry. Silently using 0
+        # produced wrong cost basis; default to 2 bps which is conservative.
+        "fee_bps_default": "2",
         # Phase 2: trade worthiness
         "max_slippage_bps": "0",
         "min_survivability": "0",
@@ -292,6 +296,12 @@ class Settings:
     ev_fee_bps: float = 0.0
     ev_time_discount_rate: float = 0.05
     ev_max_hours_to_resolution: float = 0.0
+
+    # Execution fee fallback (E10a): used by bot.execution when CLOB
+    # get_fee_rate_bps fails after one retry. Conservative default of 2 bps
+    # so we don't silently submit with fee_bps=0 (which produced wrong cost
+    # basis and risked signature rejection).
+    fee_bps_default: int = 2
 
     # Phase 2: trade worthiness
     max_slippage_bps: float = 0.0
@@ -499,6 +509,7 @@ class Settings:
             ev_fee_bps=_f(g("ev_fee_bps", "0"), 0.0),
             ev_time_discount_rate=_f(g("ev_time_discount_rate", "0.05"), 0.05),
             ev_max_hours_to_resolution=_f(g("ev_max_hours_to_resolution", "0"), 0.0),
+            fee_bps_default=_i(g("fee_bps_default", "2"), 2),
             max_slippage_bps=_f(g("max_slippage_bps", "0"), 0.0),
             min_survivability=_f(g("min_survivability", "0"), 0.0),
             post_entry_drift_bps=_f(g("post_entry_drift_bps", "10"), 10.0),
@@ -645,6 +656,7 @@ class Settings:
             "ev_min_profit_usd": self.ev_min_profit_usd,
             "ev_slippage_estimate_bps": self.ev_slippage_estimate_bps,
             "ev_fee_bps": self.ev_fee_bps,
+            "fee_bps_default": self.fee_bps_default,
             "ev_time_discount_rate": self.ev_time_discount_rate,
             "ev_max_hours_to_resolution": self.ev_max_hours_to_resolution,
             "max_slippage_bps": self.max_slippage_bps,

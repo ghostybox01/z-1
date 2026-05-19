@@ -100,6 +100,46 @@ def _simulate_paper_fill(
         return "dry_run"
 
 
+def _fetch_fee_bps_with_retry(
+    client: Any,
+    *,
+    token_id: str,
+    default_bps: int,
+    state: Any = None,
+) -> int:
+    """Fetch the CLOB fee rate (bps) for `token_id` with a single retry.
+
+    On both-attempt failure, log a WARNING and return `default_bps`. We
+    NEVER silently return 0 — that produced wrong cost basis and risked
+    signature rejection from the CLOB. If `state` is provided we bump a
+    `fee_fetch_failures` counter on it (using getattr/setattr so we don't
+    require a specific BotState shape).
+    """
+    last_err: Optional[BaseException] = None
+    for _attempt in range(2):
+        try:
+            return int(client.get_fee_rate_bps(token_id))
+        except Exception as e:
+            last_err = e
+            continue
+    # Both attempts failed.
+    if state is not None:
+        try:
+            cur = int(getattr(state, "fee_fetch_failures", 0) or 0)
+            setattr(state, "fee_fetch_failures", cur + 1)
+        except Exception:
+            # state may be a frozen dataclass or otherwise immutable — give up
+            # gracefully; the WARNING below still surfaces the problem.
+            pass
+    log.warning(
+        "fee_fetch_failed token=%s err=%s using_default=%d",
+        token_id[:12],
+        last_err,
+        int(default_bps),
+    )
+    return int(default_bps)
+
+
 def _extract_post_order_id(resp: Any) -> Optional[str]:
     if not isinstance(resp, dict):
         return None
@@ -233,6 +273,8 @@ async def place_limit_gtd_then_wait(
     follower_latency_ms: float = 500.0,
     intent: Any = None,
     idempotency_time_bucket: int = 60,
+    fee_bps_default: int = 2,
+    state: Any = None,
 ) -> Tuple[Optional[str], str]:
     """
     Post GTD limit; poll until filled / terminal / TTL; cancel if still open.
@@ -293,11 +335,16 @@ async def place_limit_gtd_then_wait(
         )
         return f"dry_{int(time.time())}", paper_result
 
-    fee_bps = 0
-    try:
-        fee_bps = int(client.get_fee_rate_bps(token_id))
-    except Exception:
-        pass
+    # Fee fetch (E10a): single retry on failure, then fall back to a
+    # configurable default with a WARNING. Silently defaulting to 0 — the
+    # old behavior — produced wrong cost basis and risked signature
+    # rejection by the CLOB. We never silently use 0.
+    fee_bps = _fetch_fee_bps_with_retry(
+        client,
+        token_id=token_id,
+        default_bps=int(fee_bps_default),
+        state=state,
+    )
 
     exp = int(time.time()) + max(15, int(ttl_seconds))
     order_side = BUY if side.upper() == "BUY" else SELL
