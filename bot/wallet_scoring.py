@@ -66,8 +66,12 @@ def _timing_quality_score(candidates: list[CopyCandidate]) -> float:
     sweet_ratio = sweet_spot_count / len(candidates)
 
     prices = [c.price for c in candidates]
-    if len(prices) >= 3:
+    # stdev requires >= 2 samples; sentinel 0.0 means "no spread observed"
+    if len(prices) >= 2:
         price_std = stdev(prices)
+    else:
+        price_std = 0.0
+    if len(prices) >= 3:
         dispersion_penalty = min(price_std / 0.3, 1.0)
         return sweet_ratio * 0.7 + (1.0 - dispersion_penalty) * 0.3
     return sweet_ratio
@@ -93,9 +97,11 @@ def _consistency_score(candidates: list[CopyCandidate]) -> float:
     market_diversity = min(n_markets / max(len(candidates) * 0.5, 1.0), 1.0)
 
     cat_counts = list(cats.values())
-    if len(cat_counts) > 1:
+    # stdev requires >= 2 samples; sentinel 0.0 means "no spread observed"
+    if len(cat_counts) >= 2:
         mean_c = sum(cat_counts) / len(cat_counts)
-        cat_balance = 1.0 - min(stdev(cat_counts) / max(mean_c, 1.0), 1.0)
+        cat_std = stdev(cat_counts)
+        cat_balance = 1.0 - min(cat_std / max(mean_c, 1.0), 1.0)
     else:
         cat_balance = 0.3
 

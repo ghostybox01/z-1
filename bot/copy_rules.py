@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from statistics import median
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from bot.categories import classify_market
+
+log = logging.getLogger("polymarket.copy_rules")
 
 
 @dataclass
@@ -150,13 +153,21 @@ def wallet_score(
     wallet: str,
     default_bet_usd: float,
     settings: Any,
+    state: Any = None,
 ) -> tuple[float, dict[str, float]]:
     """
     Heuristic quality score in [0,1] for source-wallet ranking.
 
     Phase 2: delegates to wallet_score_v2 when available, providing category-aware
     skill, timing quality, consistency, sample-size Bayesian shrinkage, and decay.
-    Falls back to v1 heuristic if v2 import fails (defensive).
+    Falls back to v1 heuristic if v2 import/runtime fails. Fallbacks emit a
+    WARNING log line and, when ``state`` is provided, increment
+    ``state.scoring_fallback_v1`` so operators can see silent v1 usage.
+
+    TODO(Task 12): wire ``state`` through from CopySignalAgent and admin_api so
+    the counter is always populated. Currently most callers do not pass state
+    and only the warning log fires. See bot/agents/copy_signal.py:70 and
+    bot/web/admin_api.py:631.
     """
     try:
         from bot.wallet_scoring import wallet_score_v2
@@ -164,8 +175,11 @@ def wallet_score(
             rows, wallet=wallet, default_bet_usd=default_bet_usd, settings=settings,
         )
         return score, result.components
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("scoring fallback: %s", e, exc_info=True)
+        if state is not None:
+            # getattr/setattr in case Task 1 hasn't landed the field yet.
+            setattr(state, "scoring_fallback_v1", getattr(state, "scoring_fallback_v1", 0) + 1)
 
     # V1 fallback
     cands: list[CopyCandidate] = []
