@@ -449,22 +449,22 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
       <p class="setup-desc">Enter your wallet credentials to see your real balance and place live trades. Bet sizes are pre-set for small, EV-positive trades ($2&ndash;$3).</p>
       <div class="setup-grid">
         <div class="setup-field" style="grid-column:1/-1;">
-          <label>Private Key</label>
+          <label for="setupPrivKey">Private Key</label>
           <input type="password" id="setupPrivKey" placeholder="0x... or 64-char hex" autocomplete="off">
         </div>
         <div class="setup-field">
-          <label>Wallet Address</label>
+          <label for="setupWalletAddr">Wallet Address</label>
           <input type="text" id="setupWalletAddr" placeholder="0x...">
         </div>
         <div class="setup-field">
-          <label>Signature Type</label>
+          <label for="setupSigType">Signature Type</label>
           <select id="setupSigType">
             <option value="0">0 &mdash; EOA (standard)</option>
             <option value="1">1 &mdash; Proxy wallet</option>
           </select>
         </div>
         <div class="setup-field">
-          <label>Bet Sizes (USD) &mdash; min / default / max</label>
+          <label for="setupMinBet">Bet Sizes (USD) &mdash; min / default / max</label>
           <div style="display:flex;gap:8px;">
             <input type="number" id="setupMinBet" value="2" min="1" max="100" step="0.5" style="flex:1;" title="Min bet">
             <input type="number" id="setupDefaultBet" value="2.50" min="1" max="100" step="0.5" style="flex:1;" title="Default bet">
@@ -472,14 +472,14 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
           </div>
         </div>
         <div class="setup-field">
-          <label>EV Gate &mdash; profitable trades only</label>
+          <label for="setupEvGate">EV Gate &mdash; profitable trades only</label>
           <div class="setup-toggle">
             <input type="checkbox" id="setupEvGate" checked>
             <span style="font-size:0.78rem;">Only bet when expected value is positive</span>
           </div>
         </div>
         <div class="setup-field">
-          <label>Enable Real Trading</label>
+          <label for="setupLive">Enable Real Trading</label>
           <div class="setup-toggle">
             <input type="checkbox" id="setupLive">
             <span style="font-size:0.78rem;color:var(--warn);">Disable Dry Run &mdash; places real orders!</span>
@@ -601,6 +601,7 @@ function updateSetupCard(d) {
   const card = document.getElementById('setupCard');
   if (!d.wallet || !d.has_private_key) {
     card.style.display = '';
+    document.getElementById('setupMsg').textContent = '';
     const addrInput = document.getElementById('setupWalletAddr');
     if (d.wallet && !addrInput.value) addrInput.value = d.wallet;
   } else {
@@ -609,6 +610,9 @@ function updateSetupCard(d) {
 }
 
 async function saveSetup() {
+  const btn = document.querySelector('#setupCard .btn-primary');
+  if (btn) btn.disabled = true;
+
   const pk = document.getElementById('setupPrivKey').value.trim();
   const addr = document.getElementById('setupWalletAddr').value.trim();
   const sig = document.getElementById('setupSigType').value;
@@ -618,10 +622,13 @@ async function saveSetup() {
   const evGate = document.getElementById('setupEvGate').checked;
   const live = document.getElementById('setupLive').checked;
   const msg = document.getElementById('setupMsg');
+
+  if (minBet > maxBet) { msg.className = 'setup-msg err'; msg.textContent = 'Min bet must be ≤ max bet'; if (btn) btn.disabled = false; return; }
+  if (defBet < minBet || defBet > maxBet) { msg.className = 'setup-msg err'; msg.textContent = 'Default bet must be between min and max'; if (btn) btn.disabled = false; return; }
+
   msg.className = 'setup-msg'; msg.textContent = 'Saving…';
 
   const payload = {
-    wallet_address: addr,
     polymarket_signature_type: sig,
     min_bet_usd: String(minBet),
     default_bet_usd: String(defBet),
@@ -629,6 +636,7 @@ async function saveSetup() {
     ev_gate_enabled: evGate ? 'true' : 'false',
     dry_run: live ? 'false' : 'true',
   };
+  if (addr) payload.wallet_address = addr;
   if (pk) payload.polymarket_private_key = pk;
 
   try {
@@ -642,6 +650,7 @@ async function saveSetup() {
     if (!r.ok) {
       msg.className = 'setup-msg err';
       msg.textContent = (j.detail && (j.detail.message || JSON.stringify(j.detail))) || ('Error ' + r.status);
+      if (btn) btn.disabled = false;
       return;
     }
     msg.className = 'setup-msg ok';
@@ -650,6 +659,7 @@ async function saveSetup() {
   } catch (e) {
     msg.className = 'setup-msg err';
     msg.textContent = 'Network error: ' + e.message;
+    if (btn) btn.disabled = false;
   }
 }
 
