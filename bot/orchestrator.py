@@ -1106,5 +1106,6 @@ class TradingBot:
             "last_skipped_intents": self.state.last_skipped_intents[:20],
             "copy_manager": self._copy_manager.get_summary(),
             "copy_managed_wallets": self._copy_manager.get_managed_wallets()[:50],
-            "paper_portfolio": self._paper_portfolio.get_summary() if self.settings.dry_run else {},
+            "paper_portfolio": self._paper_portfolio.get_summary(),
+            "has_private_key": bool(self.settings.polymarket_private_key),
         }

@@ -464,5 +464,51 @@ class TestReloadKeepsSettingsOnError(unittest.TestCase):
                       "Settings should be unchanged after a failed reload")
 
 
+class TestStateDictContract(unittest.TestCase):
+    """get_state_dict() must always include has_private_key and paper_portfolio."""
+
+    def _make_bot_mock(self, *, private_key="", dry_run=True, paper_summary=None):
+        from unittest.mock import MagicMock
+        from bot.orchestrator import TradingBot
+        bot = MagicMock()
+        bot.settings = Settings(
+            polymarket_private_key=private_key,
+            dry_run=dry_run,
+        )
+        bot.state = BotState()
+        bot._paper_portfolio = MagicMock()
+        bot._paper_portfolio.get_summary.return_value = paper_summary or {}
+        bot._copy_manager = MagicMock()
+        bot._copy_manager.get_summary.return_value = {}
+        bot._copy_manager.get_managed_wallets.return_value = []
+        return bot
+
+    def test_has_private_key_true_when_set(self):
+        from bot.orchestrator import TradingBot
+        bot = self._make_bot_mock(private_key="0x" + "b" * 64)
+        d = TradingBot.get_state_dict(bot)
+        self.assertTrue(d["has_private_key"])
+
+    def test_has_private_key_false_when_empty(self):
+        from bot.orchestrator import TradingBot
+        bot = self._make_bot_mock(private_key="")
+        d = TradingBot.get_state_dict(bot)
+        self.assertFalse(d["has_private_key"])
+
+    def test_paper_portfolio_included_in_live_mode(self):
+        from bot.orchestrator import TradingBot
+        bot = self._make_bot_mock(dry_run=False, paper_summary={"total_invested": 5.0})
+        d = TradingBot.get_state_dict(bot)
+        self.assertIn("paper_portfolio", d)
+        self.assertEqual(d["paper_portfolio"], {"total_invested": 5.0})
+
+    def test_paper_portfolio_included_in_dry_run_mode(self):
+        from bot.orchestrator import TradingBot
+        bot = self._make_bot_mock(dry_run=True, paper_summary={"total_invested": 10.0})
+        d = TradingBot.get_state_dict(bot)
+        self.assertIn("paper_portfolio", d)
+        self.assertEqual(d["paper_portfolio"], {"total_invested": 10.0})
+
+
 if __name__ == "__main__":
     unittest.main()
