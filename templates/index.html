@@ -622,8 +622,10 @@ async function fetchState() {
 function updateSetupCard(d) {
   const card = document.getElementById('setupCard');
   if (!d.wallet || !d.has_private_key) {
+    if (card.style.display === 'none') {
+      document.getElementById('setupMsg').textContent = '';
+    }
     card.style.display = '';
-    document.getElementById('setupMsg').textContent = '';
     const addrInput = document.getElementById('setupWalletAddr');
     if (d.wallet && !addrInput.value) addrInput.value = d.wallet;
   } else {
@@ -676,8 +678,13 @@ async function saveSetup() {
       return;
     }
     msg.className = 'setup-msg ok';
-    msg.textContent = '✓ Saved — connecting…';
-    setTimeout(() => { document.getElementById('setupCard').style.display = 'none'; fetchState(); }, 900);
+    msg.textContent = '✓ Saved — applying settings…';
+    fetch('/api/admin/reload-settings', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { ...authHeaders() },
+    }).catch(() => {});
+    setTimeout(() => { document.getElementById('setupCard').style.display = 'none'; fetchState(); }, 1200);
   } catch (e) {
     msg.className = 'setup-msg err';
     msg.textContent = 'Network error: ' + e.message;
@@ -723,7 +730,8 @@ function renderScoreboard(d) {
       '<div class="sb-item"><div class="sb-label">Paper Balance</div><div class="sb-value">$' + (pp.paper_balance || 0).toFixed(2) + '</div></div>' +
       '<div class="sb-item"><div class="sb-label">Total Invested</div><div class="sb-value">$' + (pp.total_invested || 0).toFixed(2) + '</div></div>' +
       '<div class="sb-item"><div class="sb-label">Unrealized P&amp;L</div><div class="sb-value ' + cls + '">' + sign + '$' + Math.abs(pnl).toFixed(2) + '</div></div>' +
-      '<div class="sb-item"><div class="sb-label">P&amp;L %</div><div class="sb-value ' + cls + '">' + sign + pnlPct.toFixed(1) + '%</div></div>';
+      '<div class="sb-item"><div class="sb-label">P&amp;L %</div><div class="sb-value ' + cls + '">' + sign + pnlPct.toFixed(1) + '%</div></div>' +
+      '<div class="sb-item"><div class="sb-label">Positions Open</div><div class="sb-value">' + (d.positions || []).length + '</div></div>';
   }
 }
 
