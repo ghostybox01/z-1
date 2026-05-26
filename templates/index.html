@@ -400,6 +400,14 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 .setup-msg { font-size: 0.75rem; }
 .setup-msg.ok { color: var(--accent); }
 .setup-msg.err { color: var(--danger); }
+/* Real vs Paper scoreboard */
+.scoreboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.sb-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.sb-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+.sb-value { font-size: 1.05rem; font-family: 'IBM Plex Mono', monospace; }
+.sb-value.pos { color: var(--accent); }
+.sb-value.neg { color: var(--danger); }
+.sb-value.muted { color: var(--muted); font-size: 0.82rem; }
 </style>
 </head>
 <body>
@@ -502,6 +510,20 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
     <div class="cs-card"><div class="cs-label">Markets scanned</div><div class="cs-value mono" id="scanned">0</div><div class="cs-sub" id="lastScan">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Open orders</div><div class="cs-value mono" id="openOrders">0</div><div class="cs-sub" id="reconcileMeta">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Default bet</div><div class="cs-value mono" id="betSize">$5</div><div class="cs-sub" id="betRange">min &ndash; max</div></div>
+  </div>
+
+  <!-- Real vs Paper scoreboard -->
+  <div id="scoreboardPanel" style="display:none;margin-bottom:20px;">
+    <div class="split-row" style="gap:12px;">
+      <div class="section" style="flex:1;min-width:0;">
+        <h2>Real Trades <span class="badge" id="realModeBadge" style="font-size:0.62rem;"></span></h2>
+        <div id="realStats" class="scoreboard-grid"></div>
+      </div>
+      <div class="section" style="flex:1;min-width:0;">
+        <h2>Paper Simulation</h2>
+        <div id="paperStats" class="scoreboard-grid"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Errors panel -->
@@ -660,6 +682,48 @@ async function saveSetup() {
     msg.className = 'setup-msg err';
     msg.textContent = 'Network error: ' + e.message;
     if (btn) btn.disabled = false;
+  }
+}
+
+function renderScoreboard(d) {
+  const panel = document.getElementById('scoreboardPanel');
+  const pp = d.paper_portfolio || {};
+  const hasReal = (d.trades_placed || 0) > 0 || (d.usdc_balance || 0) > 0;
+  const hasPaper = (pp.total_invested || 0) > 0;
+  if (!hasReal && !hasPaper) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  const badge = document.getElementById('realModeBadge');
+  badge.textContent = d.dry_run ? 'DRY RUN' : 'LIVE';
+  badge.className = 'badge ' + (d.dry_run ? 'dry' : 'live');
+
+  const th = d.trade_history || [];
+  const filledTrades = th.filter(t => (t.status || '').toLowerCase().includes('fill'));
+  const spent = filledTrades.reduce((s, t) => s + (t.cost || 0), 0);
+  const fillRate = (d.trades_placed || 0) > 0
+    ? Math.round((d.trades_filled || 0) / d.trades_placed * 100)
+    : 0;
+
+  document.getElementById('realStats').innerHTML =
+    '<div class="sb-item"><div class="sb-label">USDC Balance</div><div class="sb-value">$' + (d.usdc_balance || 0).toFixed(2) + '</div></div>' +
+    '<div class="sb-item"><div class="sb-label">Placed / Filled</div><div class="sb-value">' + (d.trades_placed || 0) + ' / ' + (d.trades_filled || 0) + '</div></div>' +
+    '<div class="sb-item"><div class="sb-label">Fill Rate</div><div class="sb-value">' + fillRate + '%</div></div>' +
+    '<div class="sb-item"><div class="sb-label">USDC Spent</div><div class="sb-value">$' + spent.toFixed(2) + '</div></div>';
+
+  if (!hasPaper) {
+    document.getElementById('paperStats').innerHTML =
+      '<div class="sb-item" style="grid-column:1/-1;"><div class="sb-label">Paper Simulation</div>' +
+      '<div class="sb-value muted">Run in Dry Run mode first to compare</div></div>';
+  } else {
+    const pnl = pp.unrealized_pnl || 0;
+    const pnlPct = pp.unrealized_pnl_pct || 0;
+    const cls = pnl >= 0 ? 'pos' : 'neg';
+    const sign = pnl >= 0 ? '+' : '';
+    document.getElementById('paperStats').innerHTML =
+      '<div class="sb-item"><div class="sb-label">Paper Balance</div><div class="sb-value">$' + (pp.paper_balance || 0).toFixed(2) + '</div></div>' +
+      '<div class="sb-item"><div class="sb-label">Total Invested</div><div class="sb-value">$' + (pp.total_invested || 0).toFixed(2) + '</div></div>' +
+      '<div class="sb-item"><div class="sb-label">Unrealized P&amp;L</div><div class="sb-value ' + cls + '">' + sign + '$' + Math.abs(pnl).toFixed(2) + '</div></div>' +
+      '<div class="sb-item"><div class="sb-label">P&amp;L %</div><div class="sb-value ' + cls + '">' + sign + pnlPct.toFixed(1) + '%</div></div>';
   }
 }
 
@@ -863,6 +927,7 @@ function updateUI(d) {
 
   // Diagnostic banners
   updateSetupCard(d);
+  renderScoreboard(d);
   renderDiagBanners(d);
 
   // Cycle strip — paper portfolio aware
