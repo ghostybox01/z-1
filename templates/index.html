@@ -514,7 +514,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 
   <!-- Real vs Paper scoreboard -->
   <div id="scoreboardPanel" style="display:none;margin-bottom:20px;">
-    <div class="split-row" style="gap:12px;">
+    <div class="split-row">
       <div class="section" style="flex:1;min-width:0;">
         <h2>Real Trades <span class="badge" id="realModeBadge" style="font-size:0.62rem;"></span></h2>
         <div id="realStats" class="scoreboard-grid"></div>
@@ -688,7 +688,7 @@ async function saveSetup() {
 function renderScoreboard(d) {
   const panel = document.getElementById('scoreboardPanel');
   const pp = d.paper_portfolio || {};
-  const hasReal = (d.trades_placed || 0) > 0 || (d.usdc_balance || 0) > 0;
+  const hasReal = (d.trades_placed || 0) > 0;
   const hasPaper = (pp.total_invested || 0) > 0;
   if (!hasReal && !hasPaper) { panel.style.display = 'none'; return; }
   panel.style.display = '';
@@ -708,7 +708,7 @@ function renderScoreboard(d) {
     '<div class="sb-item"><div class="sb-label">USDC Balance</div><div class="sb-value">$' + (d.usdc_balance || 0).toFixed(2) + '</div></div>' +
     '<div class="sb-item"><div class="sb-label">Placed / Filled</div><div class="sb-value">' + (d.trades_placed || 0) + ' / ' + (d.trades_filled || 0) + '</div></div>' +
     '<div class="sb-item"><div class="sb-label">Fill Rate</div><div class="sb-value">' + fillRate + '%</div></div>' +
-    '<div class="sb-item"><div class="sb-label">USDC Spent</div><div class="sb-value">$' + spent.toFixed(2) + '</div></div>';
+    '<div class="sb-item"><div class="sb-label">USDC Spent (last 50)</div><div class="sb-value">$' + spent.toFixed(2) + '</div></div>';
 
   if (!hasPaper) {
     document.getElementById('paperStats').innerHTML =
