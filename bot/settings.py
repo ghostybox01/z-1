@@ -68,6 +68,7 @@ def default_kv_seed() -> dict[str, str]:
         "scan_interval_seconds": "120",
         "min_clob_liquidity_usd": "500",
         "min_gamma_volume": "1000",
+        "gamma_max_pages": "2",
         "max_trades_per_cycle": "1",
         "strict_execution": "true",
         "order_ttl_seconds": "45",
@@ -189,6 +190,7 @@ class Settings:
     scan_interval_seconds: int = 120
     min_clob_liquidity_usd: float = 500.0
     min_gamma_volume: float = 1000.0
+    gamma_max_pages: int = 2
     max_trades_per_cycle: int = 1
 
     strict_execution: bool = True
@@ -411,6 +413,7 @@ class Settings:
             scan_interval_seconds=_i(g("scan_interval_seconds", "120"), 120),
             min_clob_liquidity_usd=_f(g("min_clob_liquidity_usd", "500"), 500.0),
             min_gamma_volume=_f(g("min_gamma_volume", "1000"), 1000.0),
+            gamma_max_pages=_i(g("gamma_max_pages", "2"), 2),
             max_trades_per_cycle=_i(g("max_trades_per_cycle", "1"), 1),
             strict_execution=_b(g("strict_execution", "true"), True),
             order_ttl_seconds=_i(g("order_ttl_seconds", "45"), 45),

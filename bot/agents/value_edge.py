@@ -27,8 +27,10 @@ class ValueEdgeAgent:
         rate_limit: Callable[[], Awaitable[None]],
     ) -> list[TradeIntent]:
         out: list[TradeIntent] = []
+        _skip_pos = _skip_liq = _skip_range = _skip_bad_price = 0
         for m in markets:
             if any(t in position_tokens for t in m.get("tokens", [])):
+                _skip_pos += 1
                 continue
 
             cat: MarketCategory = m["category"]
@@ -60,6 +62,7 @@ class ValueEdgeAgent:
 
             liq = float(m.get("liquidity", 0))
             if liq < self.settings.min_clob_liquidity_usd:
+                _skip_liq += 1
                 continue
 
             liq_need = max(float(self.settings.value_liq_floor_usd), float(self.settings.min_clob_liquidity_usd))
@@ -75,6 +78,7 @@ class ValueEdgeAgent:
             # EV = (mid - entry) / entry ≈ +100bps, comfortably above 25bps threshold.
             if y_lo <= gamma_p0 <= y_hi and liq >= liq_need:
                 if p0 <= 0.01 or p0 >= 0.99:
+                    _skip_bad_price += 1
                     continue
                 entry = round(max(p0 * 0.99, 0.01), 4)
                 out.append(
@@ -121,5 +125,12 @@ class ValueEdgeAgent:
                 )
 
         out.sort(key=lambda x: -x.priority)
-        log.info("ValueEdgeAgent: %d candidate intents", len(out))
+        _in_range = sum(
+            1 for m in markets
+            if len(m.get("prices", [])) >= 1 and float(self.settings.value_yes_low) <= float(m["prices"][0]) <= float(self.settings.value_yes_high)
+        )
+        log.info(
+            "ValueEdgeAgent: %d intents | scanned=%d in_price_range=%d skip_liq=%d skip_pos=%d skip_bad_price=%d",
+            len(out), len(markets), _in_range, _skip_liq, _skip_pos, _skip_bad_price,
+        )
         return out

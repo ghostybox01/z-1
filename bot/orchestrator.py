@@ -363,16 +363,21 @@ class TradingBot:
 
     async def _gamma_scan(self) -> list[dict]:
         assert self._http is not None
+        max_pages = max(1, int(getattr(self.settings, "gamma_max_pages", 2) or 2))
         markets, cache = await scan_tradeable_markets(
             self._http,
             self._rate_limit,
-            max_pages=2,
+            max_pages=max_pages,
             min_liquidity=self.settings.min_clob_liquidity_usd,
             min_volume=self.settings.min_gamma_volume,
         )
         self._market_cache = cache
         self.state.markets_scanned = len(markets)
         self.state.last_scan = utc_now_iso()
+        # Category breakdown for diagnostics
+        from collections import Counter
+        cat_counts = Counter(str(m.get("category", "unknown")) for m in markets)
+        log.info("Market categories: %s", dict(cat_counts.most_common()))
         return markets
 
     async def _cex_map_for_intents(self, intents: list[TradeIntent]) -> dict[str, Optional[float]]:
