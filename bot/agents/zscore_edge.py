@@ -50,6 +50,13 @@ class ZScoreEdgeAgent:
             cat = m["category"]
             q = m.get("question", "")
 
+            # Pre-filter using Gamma consensus price to avoid wasting CLOB calls
+            gamma_prices = m.get("prices", [])
+            if gamma_prices:
+                gp0 = float(gamma_prices[0])
+                if gp0 <= 0.03 or gp0 >= 0.97:
+                    continue  # extreme Gamma price → CLOB will also be extreme, skip
+
             await rate_limit()
             try:
                 raw0 = clob.get_midpoint(token_id=tokens[0])
