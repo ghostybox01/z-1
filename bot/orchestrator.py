@@ -128,6 +128,17 @@ class TradingBot:
             if self.settings.wallet_address and not is_valid_polygon_address(self.settings.wallet_address):
                 self.state.errors.append("Invalid WALLET_ADDRESS format")
                 return False
+        # Apply CLOB proxy BEFORE creating the client (patches module-level httpx.Client)
+        _proxy_url = (getattr(self.settings, "clob_https_proxy", "") or "").strip()
+        if _proxy_url:
+            try:
+                import httpx as _httpx
+                import py_clob_client.http_helpers.helpers as _clob_http
+                _clob_http._http_client = _httpx.Client(http2=True, proxy=_proxy_url)
+                log.info("CLOB proxy active: %s…", _proxy_url[:50])
+            except Exception as _pe:
+                log.warning("CLOB proxy setup failed (check clob_https_proxy setting): %s", _pe)
+
         try:
             st = self.settings.polymarket_signature_type
             funder = self.settings.wallet_address if st == 1 else None

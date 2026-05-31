@@ -33,7 +33,10 @@ _WEATHER = re.compile(
     re.I,
 )
 _SPORTS = re.compile(
-    r"\b(nba|nfl|nhl|mlb|ufc|soccer|football|basketball|tennis|golf|spread|total\s+points|vs\.?)\b",
+    r"\b(nba|nfl|nhl|mlb|ufc|soccer|football|basketball|tennis|golf|spread|total\s+points|vs\.?|"
+    r"fifa|world\s+cup|worldcup|champion(?:ship)?|premier\s+league|la\s+liga|bundesliga|"
+    r"serie\s+a|ligue\s+1|eredivisie|mls|nwsl|innings|wicket|cricket|"
+    r"formula\s+one|f1|grand\s+prix|olympic|medal|nascar|superbowl|super\s+bowl)\b",
     re.I,
 )
 _POLITICS = re.compile(
