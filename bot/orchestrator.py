@@ -62,6 +62,8 @@ class TradingBot:
         self._zscore_agent = ZScoreEdgeAgent(self.settings)
         self._copy_manager = CopyManager(self.settings)
         self._paper_portfolio = PaperPortfolio()
+        # Per-session geoblock blocklist: markets that returned 403 are skipped automatically
+        self._geoblocked_tokens: Set[str] = set()
 
         w = self.settings.wallet_address
         log.info(
@@ -763,6 +765,10 @@ class TradingBot:
                     continue
 
                 intent = unit[0]
+                # Skip market if it was geo-blocked in a previous attempt this session
+                if intent.token_id in self._geoblocked_tokens:
+                    skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "geoblocked"})
+                    continue
                 await self._apply_intent_multipliers(intent)
                 disp = self._dispersion_for_intent(intent, cex_map)
                 if not await self._orderbook_gate_passes(intent):
@@ -806,7 +812,17 @@ class TradingBot:
                     continue
 
                 ok_ex = await self._execute_intent(intent)
-                self._note_exec_result(ok_ex)
+                # Detect geoblock (403): auto-blocklist this token, don't count as circuit breaker failure
+                last_err = self.state.errors[-1] if self.state.errors else ""
+                if not ok_ex and "403" in str(last_err) and "region" in str(last_err).lower():
+                    self._geoblocked_tokens.add(intent.token_id)
+                    log.info(
+                        "Geoblock 403: auto-listed token %s… (%s)",
+                        intent.token_id[:16],
+                        intent.question[:50],
+                    )
+                else:
+                    self._note_exec_result(ok_ex)
                 if ok_ex:
                     rolling_n += float(intent.size_usd)
                     if intent.condition_id:
