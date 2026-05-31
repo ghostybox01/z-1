@@ -10,6 +10,7 @@ from typing import Any, Optional, Set
 
 import httpx
 from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
 
 from bot.agents.bundle_arb import BundleArbAgent
 from bot.agents.copy_signal import CopySignalAgent
@@ -155,6 +156,20 @@ class TradingBot:
                 self.state.usdc_balance = self.settings.default_bet_usd * 100
                 log.info("DRY RUN: no wallet configured, using simulated balance $%.2f", self.state.usdc_balance)
             return
+        # Primary: CLOB exchange balance (USDC deposited and ready to trade)
+        if self.clob is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                resp = await loop.run_in_executor(
+                    None, lambda: self.clob.get_balance_allowance(params=params)
+                )
+                raw = resp.get("balance", "0") if isinstance(resp, dict) else "0"
+                self.state.usdc_balance = int(raw) / 1e6
+                return
+            except Exception:
+                pass  # fall through to on-chain fallback
+        # Fallback: on-chain ERC-20 balance (wallet not yet deposited to exchange)
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
