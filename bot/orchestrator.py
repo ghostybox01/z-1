@@ -364,12 +364,14 @@ class TradingBot:
     async def _gamma_scan(self) -> list[dict]:
         assert self._http is not None
         max_pages = max(1, int(getattr(self.settings, "gamma_max_pages", 2) or 2))
+        vol_supp = max(0, int(getattr(self.settings, "gamma_volume_supplement_pages", 3) or 3))
         markets, cache = await scan_tradeable_markets(
             self._http,
             self._rate_limit,
             max_pages=max_pages,
             min_liquidity=self.settings.min_clob_liquidity_usd,
             min_volume=self.settings.min_gamma_volume,
+            volume_supplement_pages=vol_supp,
         )
         self._market_cache = cache
         self.state.markets_scanned = len(markets)
