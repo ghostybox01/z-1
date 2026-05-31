@@ -1,4 +1,4 @@
-"""Scans Gamma tradeables; uses CLOB mid vs simple value bands (book-aware via midpoint API)."""
+"""Scans Gamma tradeables; uses Gamma consensus price vs CLOB mid for genuine EV edge."""
 
 from __future__ import annotations
 
@@ -38,20 +38,25 @@ class ValueEdgeAgent:
             if len(tokens) < 2 or len(prices) < 2:
                 continue
 
+            # Gamma consensus prices = external fair-value estimate
+            gamma_p0 = float(prices[0])
+            gamma_p1 = float(prices[1])
+
+            # CLOB midpoints = actual live entry price
             await rate_limit()
             try:
                 mid0 = clob.get_midpoint(token_id=tokens[0])
                 parsed = parse_midpoint(mid0)
-                p0 = float(parsed) if parsed is not None else float(prices[0])
+                p0 = float(parsed) if parsed is not None else gamma_p0
             except Exception:
-                p0 = float(prices[0])
+                p0 = gamma_p0
             await rate_limit()
             try:
                 mid1 = clob.get_midpoint(token_id=tokens[1])
                 parsed = parse_midpoint(mid1)
-                p1 = float(parsed) if parsed is not None else float(prices[1])
+                p1 = float(parsed) if parsed is not None else gamma_p1
             except Exception:
-                p1 = float(prices[1])
+                p1 = gamma_p1
 
             liq = float(m.get("liquidity", 0))
             if liq < self.settings.min_clob_liquidity_usd:
@@ -63,11 +68,14 @@ class ValueEdgeAgent:
             yn_min = float(self.settings.value_no_yes_min)
             yn_max = float(self.settings.value_no_no_max)
 
-            # Value YES (token 0)
-            if y_lo <= p0 <= y_hi and liq >= liq_need:
+            # Value YES: Gamma says market is in value range, buy if CLOB is cheaper than Gamma.
+            # reference_price = Gamma price (fair value); max_price = CLOB mid + 1% (entry).
+            # EV > 0 only when Gamma > CLOB entry, meaning the CLOB is underpricing relative to
+            # the broader consensus — a genuine positive-EV entry.
+            if y_lo <= gamma_p0 <= y_hi and liq >= liq_need:
                 if p0 <= 0.01 or p0 >= 0.99:
                     continue
-                shares = self.settings.default_bet_usd / p0
+                entry = round(min(p0 * 1.01, 0.99), 4)
                 out.append(
                     TradeIntent(
                         agent=self.name,
@@ -77,21 +85,24 @@ class ValueEdgeAgent:
                         question=m["question"],
                         outcome=str(outcomes[0]),
                         side="BUY",
-                        max_price=round(min(p0 * 1.01, 0.99), 4),
+                        max_price=entry,
                         size_usd=self.settings.default_bet_usd,
                         category=cat,
                         strategy="value_yes",
-                        reason=f"mid_yes={p0:.3f} liq={liq:.0f}",
-                        reference_price=p0,
+                        reason=f"gamma={gamma_p0:.3f} clob_mid={p0:.3f} liq={liq:.0f}",
+                        reference_price=gamma_p0,  # fair value = Gamma consensus
                     )
                 )
 
-            # Value NO (token 1) when YES rich
+            # Value NO: YES is overpriced on Gamma → buy NO.
+            # reference_price = Gamma-implied NO price (1 - gamma_p0).
             yes_p = p0
             no_p = p1
+            gamma_no = 1.0 - gamma_p0
             if yes_p >= yn_min and no_p <= yn_max and liq >= liq_need:
                 if no_p <= 0.01 or no_p >= 0.99:
                     continue
+                entry_no = round(min(no_p * 1.01, 0.99), 4)
                 out.append(
                     TradeIntent(
                         agent=self.name,
@@ -101,12 +112,12 @@ class ValueEdgeAgent:
                         question=m["question"],
                         outcome=str(outcomes[1] if len(outcomes) > 1 else "No"),
                         side="BUY",
-                        max_price=round(min(no_p * 1.01, 0.99), 4),
+                        max_price=entry_no,
                         size_usd=self.settings.default_bet_usd,
                         category=cat,
                         strategy="value_no",
-                        reason=f"mid_yes={yes_p:.3f} mid_no={no_p:.3f} liq={liq:.0f}",
-                        reference_price=no_p,
+                        reason=f"gamma_yes={gamma_p0:.3f} gamma_no={gamma_no:.3f} clob_no={no_p:.3f} liq={liq:.0f}",
+                        reference_price=gamma_no,  # fair value = Gamma-implied NO price
                     )
                 )
 

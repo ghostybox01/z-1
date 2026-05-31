@@ -106,7 +106,8 @@ class ZScoreEdgeAgent:
                         category=cat,
                         strategy="zscore_buy_yes",
                         reason=f"z={z:.2f} p0={p0:.3f} mu={mu:.3f} sd={sd:.4f}",
-                        reference_price=p0,
+                        # fair value = historical mean (mean-reversion target); EV > 0 when mu > entry
+                        reference_price=round(min(max(mu, 0.01), 0.99), 4),
                     )
                 )
             elif z >= z_min and tokens[1] not in position_tokens:
@@ -118,6 +119,8 @@ class ZScoreEdgeAgent:
                     p1 = 1.0 - p0
                 if p1 <= 0.01 or p1 >= 0.99:
                     continue
+                # For NO (z >= +z_min → YES overpriced): fair value of NO = 1 - mu
+                no_mu = 1.0 - mu
                 out.append(
                     TradeIntent(
                         agent=self.name,
@@ -132,7 +135,8 @@ class ZScoreEdgeAgent:
                         category=cat,
                         strategy="zscore_buy_no",
                         reason=f"z={z:.2f} p0={p0:.3f} mu={mu:.3f} sd={sd:.4f}",
-                        reference_price=p1,
+                        # fair value of NO = 1 - mean YES price (mean-reversion target)
+                        reference_price=round(min(max(no_mu, 0.01), 0.99), 4),
                     )
                 )
 
