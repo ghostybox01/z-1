@@ -68,14 +68,15 @@ class ValueEdgeAgent:
             yn_min = float(self.settings.value_no_yes_min)
             yn_max = float(self.settings.value_no_no_max)
 
-            # Value YES: Gamma says market is in value range, buy if CLOB is cheaper than Gamma.
-            # reference_price = Gamma price (fair value); max_price = CLOB mid + 1% (entry).
-            # EV > 0 only when Gamma > CLOB entry, meaning the CLOB is underpricing relative to
-            # the broader consensus — a genuine positive-EV entry.
+            # Value YES: passive maker-style limit buy at 1% below CLOB mid.
+            # We post a resting bid; it fills only if price dips, meaning we get YES cheaper
+            # than mid — inherently positive EV (we paid less than the fair midpoint price).
+            # reference_price = CLOB mid (fair value); max_price = mid * 0.99 (entry below mid).
+            # EV = (mid - entry) / entry ≈ +100bps, comfortably above 25bps threshold.
             if y_lo <= gamma_p0 <= y_hi and liq >= liq_need:
                 if p0 <= 0.01 or p0 >= 0.99:
                     continue
-                entry = round(min(p0 * 1.01, 0.99), 4)
+                entry = round(max(p0 * 0.99, 0.01), 4)
                 out.append(
                     TradeIntent(
                         agent=self.name,
@@ -89,20 +90,18 @@ class ValueEdgeAgent:
                         size_usd=self.settings.default_bet_usd,
                         category=cat,
                         strategy="value_yes",
-                        reason=f"gamma={gamma_p0:.3f} clob_mid={p0:.3f} liq={liq:.0f}",
-                        reference_price=gamma_p0,  # fair value = Gamma consensus
+                        reason=f"gamma={gamma_p0:.3f} clob_mid={p0:.3f} passive_bid={entry:.4f} liq={liq:.0f}",
+                        reference_price=p0,  # fair value = CLOB midpoint
                     )
                 )
 
-            # Value NO: YES is overpriced on Gamma → buy NO.
-            # reference_price = Gamma-implied NO price (1 - gamma_p0).
+            # Value NO: YES is overpriced → passive limit buy of NO at 1% below NO mid.
             yes_p = p0
             no_p = p1
-            gamma_no = 1.0 - gamma_p0
             if yes_p >= yn_min and no_p <= yn_max and liq >= liq_need:
                 if no_p <= 0.01 or no_p >= 0.99:
                     continue
-                entry_no = round(min(no_p * 1.01, 0.99), 4)
+                entry_no = round(max(no_p * 0.99, 0.01), 4)
                 out.append(
                     TradeIntent(
                         agent=self.name,
@@ -116,8 +115,8 @@ class ValueEdgeAgent:
                         size_usd=self.settings.default_bet_usd,
                         category=cat,
                         strategy="value_no",
-                        reason=f"gamma_yes={gamma_p0:.3f} gamma_no={gamma_no:.3f} clob_no={no_p:.3f} liq={liq:.0f}",
-                        reference_price=gamma_no,  # fair value = Gamma-implied NO price
+                        reason=f"clob_yes={yes_p:.3f} clob_no={no_p:.3f} passive_bid={entry_no:.4f} liq={liq:.0f}",
+                        reference_price=no_p,  # fair value = NO midpoint
                     )
                 )
 
