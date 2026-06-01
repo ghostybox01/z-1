@@ -350,6 +350,8 @@ class CopyManager:
                 "max_streak": st.max_streak,
                 "current_streak": st.current_streak,
                 "total_pnl": st.total_pnl,
+                "account_age_days": st.account_age_days,
+                "profit_factor": st.profit_factor,
                 "source_category": st.source_category,
                 "user_name": st.user_name,
                 "leaderboard_pnl": st.leaderboard_pnl,
