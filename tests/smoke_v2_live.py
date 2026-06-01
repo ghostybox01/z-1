@@ -48,10 +48,10 @@ print(f"client built (sig_type={st}, funder={funder})")
 markets = httpx.get(
     "https://gamma-api.polymarket.com/markets",
     params={
-        "limit": 25,
+        "limit": 60,
         "active": "true",
         "closed": "false",
-        "order": "liquidityClob",
+        "order": "volume",
         "ascending": "false",
     },
     timeout=30,
@@ -74,7 +74,7 @@ for m in markets:
     toks = json.loads(toks) if isinstance(toks, str) else toks
     if not toks:
         continue
-    if _best_ask(toks[0]) >= 0.10:
+    if 0.10 <= _best_ask(toks[0]) <= 0.95:
         token = toks[0]
         question = m.get("question", "")
         break
