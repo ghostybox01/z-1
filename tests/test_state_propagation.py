@@ -367,8 +367,10 @@ class TestBotStateCycleRuntime(unittest.TestCase):
 
 class TestCopyManagerPersistence(unittest.TestCase):
     def test_manual_wallets_are_seeded_and_preserved(self):
+        # Manual pinning applies only when auto-manage is OFF; with auto-manage ON
+        # configured wallets seed as 'active' so they get re-vetted/pruned.
         wallet = "0x" + "ab" * 20
-        s = Settings(copy_watch_wallets=[wallet])
+        s = Settings(copy_watch_wallets=[wallet], copy_auto_manage=False)
         mgr = CopyManager(s)
         self.assertIn(wallet, mgr.state.wallet_stats)
         self.assertEqual(mgr.state.wallet_stats[wallet].status, "manual")
