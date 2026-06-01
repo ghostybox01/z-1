@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -45,6 +46,13 @@ from bot.validate import is_valid_polygon_address, is_valid_private_key_hex
 log = logging.getLogger("polymarket.orchestrator")
 
 
+def intent_idempotency_key(intent, now_epoch: float) -> str:
+    """Deterministic short key; same intent within the same 60s bucket -> same key."""
+    bucket = int(now_epoch // 60)
+    raw = f"{intent.token_id}|{intent.side}|{round(float(intent.size_usd), 2)}|{round(float(intent.max_price), 3)}|{bucket}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 class TradingBot:
     """Production-style bot with category toggles, agents, and GTD execution."""
 
@@ -66,6 +74,8 @@ class TradingBot:
         self._paper_portfolio = PaperPortfolio()
         # Per-session geoblock blocklist: markets that returned 403 are skipped automatically
         self._geoblocked_tokens: Set[str] = set()
+        # Process-local idempotency guard: short hashes of recently-submitted intents
+        self._recent_submit_keys: set[str] = set()
 
         w = self.settings.wallet_address
         log.info(
@@ -899,6 +909,13 @@ class TradingBot:
         if not self.settings.dry_run and self.clob is None:
             self.state.errors.append("exec:no_clob_for_live_trade")
             return False
+        _idem = intent_idempotency_key(intent, time.time())
+        if _idem in self._recent_submit_keys:
+            log.info("skip duplicate intent (idempotency) %s %s", intent.strategy, intent.token_id[:12])
+            return False
+        self._recent_submit_keys.add(_idem)
+        if len(self._recent_submit_keys) > 500:
+            self._recent_submit_keys = set(list(self._recent_submit_keys)[-250:])
         await self._rate_limit()
         tick = 0.01
         if self.clob:
