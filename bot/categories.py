@@ -44,7 +44,8 @@ _POLITICS = re.compile(
     re.I,
 )
 _MACRO = re.compile(
-    r"\b(fed|fomc|interest\s*rate|cpi|inflation|gdp|unemployment|jobs\s*report|treasury|recession)\b",
+    r"\b(fed|fomc|interest\s*rate|cpi|inflation|gdp|unemployment|jobs\s*report|treasury|recession|"
+    r"crude|wti|brent|crude\s+oil|oil|gold|xau|silver|natural\s+gas|opec)\b",
     re.I,
 )
 _TECH = re.compile(

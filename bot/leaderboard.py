@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -338,6 +339,20 @@ async def analyze_wallet_quality(
     loss_pnls = [rt["pnl"] for rt in round_trips if rt["pnl"] < -_PNL_EPSILON]
     observed_total_pnl = active_pnl + resolved_pnl
 
+    # --- Account age (days since earliest trade timestamp) -------------------
+    positive_timestamps = [
+        float(t.get("timestamp") or 0)
+        for t in trades_raw
+        if t.get("timestamp") and float(t.get("timestamp") or 0) > 0
+    ]
+    earliest_ts = min(positive_timestamps) if positive_timestamps else 0.0
+    account_age_days = (time.time() - earliest_ts) / 86400.0 if earliest_ts > 0 else 0.0
+
+    # --- Profit factor (gross wins / gross losses from round-trips) ----------
+    gross_win = sum(rt["pnl"] for rt in round_trips if rt["pnl"] > 0)
+    gross_loss = abs(sum(rt["pnl"] for rt in round_trips if rt["pnl"] < 0))
+    profit_factor: float | None = (gross_win / gross_loss) if gross_loss > 0 else None
+
     # Compute open-position count by re-walking trades minimally
     books: dict[str, list[list[float]]] = defaultdict(list)
     def _f2(v: Any) -> float:
@@ -389,6 +404,9 @@ async def analyze_wallet_quality(
         "loss_visibility": loss_visibility,
         "verified_total": verified_total,
         "open_position_count": _open_inventory_size(books),
+        # new — account history and profitability quality gates
+        "account_age_days": account_age_days,
+        "profit_factor": profit_factor,
     }
 
 
@@ -402,6 +420,8 @@ async def discover_qualified_wallets(
     min_win_rate: float = 0.60,
     min_win_streak: int = 3,
     min_total_trades: int = 5,
+    min_account_age_days: float = 0.0,
+    min_profit_factor: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Discover top wallets and filter by actual win rate and streak.
 
@@ -464,6 +484,20 @@ async def discover_qualified_wallets(
 
         if quality["max_streak"] < min_win_streak:
             merged["_rejected"] = f"low_streak ({quality['max_streak']} < {min_win_streak})"
+            log.info("leaderboard skip %s: %s", cand["wallet"][:12], merged["_rejected"])
+            continue
+
+        # Account-age gate.
+        age = quality["account_age_days"]
+        if min_account_age_days > 0 and age < min_account_age_days:
+            merged["_rejected"] = f"too_young ({age:.1f}d < {min_account_age_days:.1f}d)"
+            log.info("leaderboard skip %s: %s", cand["wallet"][:12], merged["_rejected"])
+            continue
+
+        # Profit-factor gate (None means no observed losses — do NOT reject).
+        pf = quality["profit_factor"]
+        if min_profit_factor > 0 and pf is not None and pf < min_profit_factor:
+            merged["_rejected"] = f"low_profit_factor ({pf:.2f} < {min_profit_factor:.2f})"
             log.info("leaderboard skip %s: %s", cand["wallet"][:12], merged["_rejected"])
             continue
 

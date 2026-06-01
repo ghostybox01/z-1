@@ -52,6 +52,8 @@ class WalletStats:
     user_name: str = ""
     leaderboard_pnl: float = 0.0
     status: str = "active"  # active | probation | pruned | manual
+    account_age_days: float = 0.0
+    profit_factor: float = 0.0
 
 
 @dataclass
@@ -112,6 +114,12 @@ class CopyManager:
 
     def _min_total_trades(self) -> int:
         return int(getattr(self.settings, "copy_min_total_trades", 5) or 5)
+
+    def _min_account_age_days(self) -> float:
+        return float(getattr(self.settings, "copy_min_account_age_days", 30.0) or 0.0)
+
+    def _min_profit_factor(self) -> float:
+        return float(getattr(self.settings, "copy_min_profit_factor", 1.5) or 0.0)
 
     def _max_wallets(self) -> int:
         return int(getattr(self.settings, "copy_max_watched_wallets", 50) or 50)
@@ -177,6 +185,8 @@ class CopyManager:
             min_win_rate=self._min_win_rate(),
             min_win_streak=self._min_win_streak(),
             min_total_trades=self._min_total_trades(),
+            min_account_age_days=self._min_account_age_days(),
+            min_profit_factor=self._min_profit_factor(),
         )
 
         added = 0
@@ -194,6 +204,8 @@ class CopyManager:
                 st.max_streak = q.get("max_streak", st.max_streak)
                 st.current_streak = q.get("current_streak", st.current_streak)
                 st.total_pnl = q.get("total_pnl", st.total_pnl)
+                st.account_age_days = q.get("account_age_days", 0) or 0
+                st.profit_factor = q.get("profit_factor", 0) or 0
                 st.last_checked = time.time()
                 if st.status == "pruned":
                     st.status = "active"
@@ -217,6 +229,8 @@ class CopyManager:
                 user_name=q.get("userName", ""),
                 leaderboard_pnl=q.get("pnl", 0),
                 status="active",
+                account_age_days=q.get("account_age_days", 0) or 0,
+                profit_factor=q.get("profit_factor", 0) or 0,
             )
             added += 1
 
@@ -283,6 +297,10 @@ class CopyManager:
             st.max_streak = quality["max_streak"]
             st.current_streak = quality["current_streak"]
             st.total_pnl = quality["total_pnl"]
+            age = quality.get("account_age_days", 0)
+            pf = quality.get("profit_factor")
+            st.account_age_days = age or 0
+            st.profit_factor = pf or 0
             st.last_checked = time.time()
 
             if quality["total"] >= min_trades and new_wr < prune_threshold:
@@ -291,6 +309,20 @@ class CopyManager:
                 log.info(
                     "CopyManager PRUNED %s: WR=%.0f%% < %.0f%% threshold",
                     w[:12], new_wr * 100, prune_threshold * 100,
+                )
+            elif age < self._min_account_age_days():
+                st.status = "pruned"
+                pruned += 1
+                log.info(
+                    "CopyManager PRUNED %s: account_age_days=%.1f < %.1f threshold",
+                    w[:12], age, self._min_account_age_days(),
+                )
+            elif self._min_profit_factor() > 0 and pf is not None and pf < self._min_profit_factor():
+                st.status = "pruned"
+                pruned += 1
+                log.info(
+                    "CopyManager PRUNED %s: profit_factor=%.2f < %.2f threshold",
+                    w[:12], pf, self._min_profit_factor(),
                 )
 
         self.state.total_pruned += pruned

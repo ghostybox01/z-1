@@ -106,6 +106,8 @@ def default_kv_seed() -> dict[str, str]:
         "copy_min_win_rate": "0.60",
         "copy_min_win_streak": "3",
         "copy_min_total_trades": "5",
+        "copy_min_account_age_days": "30",
+        "copy_min_profit_factor": "1.5",
         "copy_auto_manage": "true",
         "copy_refresh_interval_hours": "6",
         "copy_max_watched_wallets": "50",
@@ -234,6 +236,8 @@ class Settings:
     copy_min_win_rate: float = 0.60
     copy_min_win_streak: int = 3
     copy_min_total_trades: int = 5
+    copy_min_account_age_days: float = 30.0
+    copy_min_profit_factor: float = 1.5
     copy_auto_manage: bool = True
     copy_refresh_interval_hours: float = 6.0
     copy_max_watched_wallets: int = 50
@@ -455,6 +459,8 @@ class Settings:
             copy_min_win_rate=_f(g("copy_min_win_rate", "0.60"), 0.60),
             copy_min_win_streak=_i(g("copy_min_win_streak", "3"), 3),
             copy_min_total_trades=_i(g("copy_min_total_trades", "5"), 5),
+            copy_min_account_age_days=_f(g("copy_min_account_age_days", "30"), 30.0),
+            copy_min_profit_factor=_f(g("copy_min_profit_factor", "1.5"), 1.5),
             copy_auto_manage=_b(g("copy_auto_manage", "true"), True),
             copy_refresh_interval_hours=_f(g("copy_refresh_interval_hours", "6"), 6.0),
             copy_max_watched_wallets=_i(g("copy_max_watched_wallets", "50"), 50),
