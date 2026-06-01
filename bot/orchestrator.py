@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 from typing import Any, Optional, Set
 
@@ -925,7 +926,9 @@ class TradingBot:
                 tick = 0.01
         price = round(intent.max_price / tick) * tick
         price = round(min(max(price, tick), 1.0 - tick), 6)
-        size_shares = round(intent.size_usd / price, 2)
+        # Round notional UP to >= $1 (Polymarket marketable-order minimum) and >= 1 share.
+        target_usd = max(1.0, float(intent.size_usd))
+        size_shares = math.ceil((target_usd / price) * 100.0) / 100.0
         if size_shares < 1.0:
             size_shares = 1.0
 

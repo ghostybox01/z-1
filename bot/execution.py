@@ -127,7 +127,8 @@ async def place_limit_gtd_then_wait(
         )
         return f"dry_{int(time.time())}", paper_result
 
-    exp = int(time.time()) + max(15, int(ttl_seconds))
+    # V2 requires expiration >= now + 60s security threshold + intended lifetime.
+    exp = int(time.time()) + 60 + max(15, int(ttl_seconds))
     order_side = BUY if side.upper() == "BUY" else SELL
 
     args = OrderArgs(token_id=token_id, price=price, size=size, side=order_side, expiration=exp)
