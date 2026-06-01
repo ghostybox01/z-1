@@ -300,6 +300,9 @@ class TradingBot:
         if not self._market_cache and self.clob:
             await self._gamma_scan()
 
+        our_tokens = {str(t.token_id) for t in self.state.trade_history if getattr(t, "token_id", "")}
+        summ = {"active": 0, "won": 0, "lost": 0, "realized_pnl": 0.0}
+        counted: set[str] = set()
         positions = []
         for pos in raw:
             asset = pos.get("asset")
@@ -316,6 +319,17 @@ class TradingBot:
                 continue
             redeemable = bool(pos.get("redeemable", False))
             current_value = float(pos.get("currentValue", 0) or 0)
+            if token_id in our_tokens and token_id not in counted:
+                counted.add(token_id)
+                _rd = bool(pos.get("redeemable", False))
+                _cv = float(pos.get("currentValue", 0) or 0)
+                _iv = float(pos.get("initialValue", 0) or 0)
+                if _rd and _cv > 0.01:
+                    summ["won"] += 1; summ["realized_pnl"] += (_cv - _iv)
+                elif _rd:
+                    summ["lost"] += 1; summ["realized_pnl"] += (0.0 - _iv)
+                else:
+                    summ["active"] += 1
             # Skip settled positions worth ~nothing (resolved losers): they are
             # done, not open, and the old avg-price fallback valued them at cost,
             # inflating the portfolio. Keep redeemable winners (currentValue > 0).
@@ -353,6 +367,8 @@ class TradingBot:
                     "redeemable": redeemable,
                 }
             )
+        summ["realized_pnl"] = round(summ["realized_pnl"], 2)
+        self.state.position_summary = summ
         self.state.positions = positions
         self.state.portfolio_value = sum(p["value"] for p in positions)
         self.state.total_pnl = sum(p["pnl"] for p in positions)
@@ -1219,4 +1235,5 @@ class TradingBot:
             "copy_managed_wallets": self._copy_manager.get_managed_wallets()[:50],
             "paper_portfolio": self._paper_portfolio.get_summary(),
             "has_private_key": bool(self.settings.polymarket_private_key),
+            "position_summary": self.state.position_summary,
         }

@@ -519,7 +519,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
         <h2>Real Trades <span class="badge" id="realModeBadge" style="font-size:0.62rem;"></span></h2>
         <div id="realStats" class="scoreboard-grid"></div>
       </div>
-      <div class="section" style="flex:1;min-width:0;">
+      <div class="section" style="flex:1;min-width:0;display:none;">
         <h2>Paper Simulation</h2>
         <div id="paperStats" class="scoreboard-grid"></div>
       </div>
@@ -570,7 +570,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 
   <!-- Open positions -->
   <div class="section" id="sectionPositions">
-    <h2>Open positions</h2>
+    <h2>Open positions <span id="posSummary" class="badge" style="font-size:0.62rem;font-weight:600;"></span></h2>
     <table>
       <thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg</th><th>Mid</th><th>Value</th><th>P&amp;L</th></tr></thead>
       <tbody id="positionsBody"><tr><td colspan="7" class="gray">Loading&hellip;</td></tr></tbody>
@@ -1023,6 +1023,12 @@ function updateUI(d) {
     '<td class="mono">' + (o.size_matched != null ? Number(o.size_matched).toFixed(2) : '\u2014') + ' / ' + (o.original_size != null ? Number(o.original_size).toFixed(2) : '\u2014') + '</td>' +
     '<td>' + escHtml(o.status||'\u2014') + '</td>' +
   '</tr>').join('');
+
+  // Position win/lost/active summary badge
+  const ps = d.position_summary || {};
+  const rp = ps.realized_pnl || 0;
+  const el = document.getElementById('posSummary');
+  if (el) el.textContent = (ps.active||0) + ' active · ' + (ps.won||0) + ' won · ' + (ps.lost||0) + ' lost · realized ' + (rp>=0?'+$':'-$') + Math.abs(rp).toFixed(2);
 
   // Positions table
   const pb = document.getElementById('positionsBody');

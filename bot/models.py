@@ -79,6 +79,7 @@ class BotState:
     last_skipped_intents: list[dict] = field(default_factory=list)
     # Per-agent runtime diagnostics from last cycle (keyed by agent id).
     cycle_agent_runtime: dict[str, dict[str, Any]] = field(default_factory=dict)
+    position_summary: dict[str, Any] = field(default_factory=dict)
 
 
 def utc_now_iso() -> str:
