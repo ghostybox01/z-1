@@ -29,7 +29,6 @@ from bot.execution import place_limit_gtd_then_wait, place_market_fok_fallback
 from bot.gamma import scan_tradeable_markets
 from bot.http_retry import get_json_retry
 from bot.models import BotState, TradeIntent, TradeRecord, utc_now_iso
-from bot.clob_utils import parse_midpoint
 from bot.reconcile import reconcile_trade_records_inplace, snapshot_open_orders
 from bot.db.kv import append_paper_trade_log, append_trade_log
 from bot.db.models import TradeLog, session_scope
@@ -315,32 +314,28 @@ class TradingBot:
             size = float(pos.get("size", 0) or 0)
             if size <= 0.01:
                 continue
+            redeemable = bool(pos.get("redeemable", False))
+            current_value = float(pos.get("currentValue", 0) or 0)
+            # Skip settled positions worth ~nothing (resolved losers): they are
+            # done, not open, and the old avg-price fallback valued them at cost,
+            # inflating the portfolio. Keep redeemable winners (currentValue > 0).
+            if redeemable and current_value < 0.01:
+                continue
             avg_price = float(pos.get("avgPrice", pos.get("avg_price", 0)) or 0)
+            # Trust the data-API's authoritative price/value/PnL — it already
+            # reflects resolution. Do NOT recompute from stale orderbook mids
+            # (that also avoids 404 "no orderbook" spam on settled markets).
             cur_price = float(pos.get("curPrice", pos.get("current_price", 0)) or 0)
+            initial_value = float(pos.get("initialValue", 0) or 0)
+            pnl = current_value - initial_value
+            pnl_pct = (pnl / initial_value * 100.0) if initial_value > 0 else 0.0
             mi = self._find_market_by_token(token_id)
             market_name = pos.get("title", pos.get("question", "")) or (
                 mi.get("question", "") if mi else ""
             )
             outcome = pos.get("outcome", "") or (mi.get("outcome_name", "") if mi else "")
-            if self.clob and cur_price <= 0:
-                await self._rate_limit()
-                try:
-                    mid = self.clob.get_midpoint(token_id=token_id)
-                    parsed = parse_midpoint(mid)
-                    if parsed is not None:
-                        cur_price = float(parsed)
-                    elif isinstance(mid, dict):
-                        cur_price = float(mid.get("mid", 0) or 0)
-                    else:
-                        cur_price = 0.0
-                except Exception:
-                    cur_price = avg_price
-            if cur_price <= 0:
-                cur_price = avg_price
-            pnl = (cur_price - avg_price) * size
-            value = cur_price * size
-            cid_pos = ""
-            if mi:
+            cid_pos = str(pos.get("conditionId") or "")
+            if not cid_pos and mi:
                 cid_pos = str(mi.get("condition_id") or mi.get("conditionId") or "")
             positions.append(
                 {
@@ -352,11 +347,10 @@ class TradingBot:
                     "size": round(size, 4),
                     "avg_price": round(avg_price, 4),
                     "current_price": round(cur_price, 4),
-                    "value": round(value, 2),
+                    "value": round(current_value, 2),
                     "pnl": round(pnl, 2),
-                    "pnl_pct": round((pnl / (avg_price * size)) * 100, 2)
-                    if avg_price * size > 0
-                    else 0,
+                    "pnl_pct": round(pnl_pct, 2),
+                    "redeemable": redeemable,
                 }
             )
         self.state.positions = positions
