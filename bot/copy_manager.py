@@ -75,7 +75,14 @@ class CopyManager:
         self._seed_manual_wallets()
 
     def _seed_manual_wallets(self) -> None:
-        """Seed configured wallets as manual so auto-manage cannot wipe them."""
+        """Seed configured wallets into tracking.
+
+        Auto-manage OFF -> seed as 'manual' (pinned, never pruned) so the user's
+        explicit picks survive. Auto-manage ON -> seed as 'active' so the persisted
+        list is continuously re-vetted and pruned on each refresh, keeping us on the
+        currently-most-successful wallets instead of a frozen list.
+        """
+        seed_status = "active" if self._auto_manage() else "manual"
         for wallet in list(getattr(self.settings, "copy_watch_wallets", []) or []):
             w = str(wallet).strip().lower()
             if not w:
@@ -86,7 +93,7 @@ class CopyManager:
                 wallet=w,
                 added_at=time.time(),
                 last_checked=0.0,
-                status="manual",
+                status=seed_status,
             )
 
     def sync_settings(self, settings: Any) -> None:
