@@ -7,9 +7,9 @@ import logging
 import time
 from typing import Any, Optional, Tuple
 
-from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.exceptions import PolyApiException
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2.clob_types import OrderArgs, OrderType
+from py_clob_client_v2.exceptions import PolyApiException
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from bot.clob_utils import is_filled_status, is_open_status, is_terminal_status, normalize_order_payload
 
@@ -127,29 +127,16 @@ async def place_limit_gtd_then_wait(
         )
         return f"dry_{int(time.time())}", paper_result
 
-    fee_bps = 0
-    try:
-        fee_bps = int(client.get_fee_rate_bps(token_id))
-    except Exception:
-        pass
-
     exp = int(time.time()) + max(15, int(ttl_seconds))
     order_side = BUY if side.upper() == "BUY" else SELL
 
-    args = OrderArgs(
-        token_id=token_id,
-        price=price,
-        size=size,
-        side=order_side,
-        fee_rate_bps=fee_bps,
-        expiration=exp,
-    )
+    args = OrderArgs(token_id=token_id, price=price, size=size, side=order_side, expiration=exp)
 
     try:
         signed = client.create_order(args)
     except PolyApiException as e:
         log.warning("create_order PolyApiException: %s", e)
-        return None, f"create_failed:poly_api:{e.status_code}:{e.error_msg}"
+        return None, f"create_failed:poly_api:{e}"
     except Exception as e:
         log.exception("create_order failed")
         return None, f"create_failed:{e}"
@@ -158,7 +145,7 @@ async def place_limit_gtd_then_wait(
         resp = client.post_order(signed, OrderType.GTD)
     except PolyApiException as e:
         log.warning("post_order PolyApiException: %s", e)
-        return None, f"post_failed:poly_api:{e.status_code}:{e.error_msg}"
+        return None, f"post_failed:poly_api:{e}"
     except Exception as e:
         log.exception("post_order failed")
         return None, f"post_failed:{e}"
@@ -189,7 +176,7 @@ async def place_limit_gtd_then_wait(
         await asyncio.sleep(poll_s)
 
     try:
-        await asyncio.to_thread(client.cancel, oid)
+        await asyncio.to_thread(client.cancel_order, oid)
         log.info("Cancelled order %s after TTL", oid)
     except Exception as e:
         log.warning("cancel failed %s: %s", oid, e)
@@ -218,16 +205,6 @@ async def place_market_fok_fallback(
     if dry_run:
         return f"dry_mkt_{int(time.time())}", "dry_run"
 
-    from py_clob_client.clob_types import MarketOrderArgs
-
-    order_side = BUY if side.upper() == "BUY" else SELL
-    mo = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=order_side)
-    try:
-        signed = client.create_market_order(mo)
-        resp = client.post_order(signed, OrderType.FOK)
-    except PolyApiException as e:
-        return None, f"market_fok_failed:poly_api:{e.status_code}:{e.error_msg}"
-    except Exception as e:
-        return None, f"market_fok_failed:{e}"
-    oid = _extract_post_order_id(resp)
-    return oid, "market_fok"
+    # V2 market-order port pending. Market fallback is OFF by default
+    # (allow_market_fallback=false, strict_execution=true), so this path is normally dead.
+    return None, "market_fok_failed:v2_market_order_not_implemented"
