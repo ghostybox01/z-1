@@ -6,6 +6,7 @@ Requires COPY_WATCH_WALLETS and AGENT_COPY=true.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Set
 
 import httpx
@@ -46,6 +47,7 @@ class CopySignalAgent:
         candidates_cold_skipped = 0
         candidates_filter_rejected = 0
         candidates_market_capped = 0
+        candidates_stale_skipped = 0
         api_errors = 0
         cycle_markets: dict[str, int] = {}
         max_per_market = 2
@@ -97,6 +99,19 @@ class CopySignalAgent:
                 if self._cold_start:
                     candidates_cold_skipped += 1
                     continue
+
+                # Freshness guard: skip stale signals (price has moved since the whale's
+                # trade). Default 10 min; tunable via copy_max_signal_age_seconds.
+                max_age = float(getattr(self.settings, "copy_max_signal_age_seconds", 600.0) or 0.0)
+                if max_age > 0:
+                    ts = entry.get("timestamp")
+                    try:
+                        age_s = time.time() - float(ts) if ts else 0.0
+                    except (TypeError, ValueError):
+                        age_s = 0.0
+                    if age_s > max_age:
+                        candidates_stale_skipped += 1
+                        continue
 
                 ok, _reason = passes_filters(self.settings, c)
                 if not ok:
@@ -154,6 +169,8 @@ class CopySignalAgent:
             parts_list.append(f"dup={candidates_seen_dup}")
         if candidates_filter_rejected:
             parts_list.append(f"filtered={candidates_filter_rejected}")
+        if candidates_stale_skipped:
+            parts_list.append(f"stale={candidates_stale_skipped}")
         if candidates_market_capped:
             parts_list.append(f"mkt_cap={candidates_market_capped}")
         if api_errors:
