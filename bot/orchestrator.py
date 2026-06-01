@@ -986,11 +986,17 @@ class TradingBot:
                 tick = 0.01
         price = round(intent.max_price / tick) * tick
         price = round(min(max(price, tick), 1.0 - tick), 6)
-        # Round notional UP to >= $1 (Polymarket marketable-order minimum) and >= 1 share.
+        # Round notional UP to >= $1 (Polymarket marketable-order minimum).
         target_usd = max(1.0, float(intent.size_usd))
         size_shares = math.ceil((target_usd / price) * 100.0) / 100.0
-        if size_shares < 1.0:
-            size_shares = 1.0
+        # Polymarket enforces a 5-share minimum order size. A $1 bet only clears
+        # 5 shares when price <= $0.20 (longshots); floor at 5 shares so we can
+        # also copy favorites — high-probability, high-win-rate bets.
+        if size_shares < 5.0:
+            size_shares = 5.0
+        # Reflect the true notional so daily/exposure caps + the balance check
+        # account for actual spend, not the $1 target estimate.
+        intent.size_usd = round(price * size_shares, 2)
 
         oid, note = await place_limit_gtd_then_wait(
             self.clob,

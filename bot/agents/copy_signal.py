@@ -124,6 +124,10 @@ class CopySignalAgent:
                     continue
                 max_px = limit_price_with_buffer(self.settings, c.price)
                 usdc = max(self.settings.min_bet_usd, min(self.settings.max_bet_usd, c.usdc))
+                # Polymarket enforces a 5-share minimum order; estimate the real cost
+                # (~5 * price) so risk caps + balance checks are honest before
+                # execution floors the share count.
+                usdc = max(usdc, round(5.0 * c.price, 2))
                 cond = str(entry.get("conditionId") or entry.get("condition_id") or "")
                 try:
                     cat = MarketCategory(c.category)
