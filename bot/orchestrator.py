@@ -9,8 +9,9 @@ import time
 from typing import Any, Optional, Set
 
 import httpx
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+from bot.clob_client import apply_clob_proxy, build_clob_client
 
 from bot.agents.bundle_arb import BundleArbAgent
 from bot.agents.copy_signal import CopySignalAgent
@@ -128,30 +129,16 @@ class TradingBot:
             if self.settings.wallet_address and not is_valid_polygon_address(self.settings.wallet_address):
                 self.state.errors.append("Invalid WALLET_ADDRESS format")
                 return False
-        # Apply CLOB proxy BEFORE creating the client (patches module-level httpx.Client)
-        _proxy_url = (getattr(self.settings, "clob_https_proxy", "") or "").strip()
-        if _proxy_url:
-            try:
-                import httpx as _httpx
-                import py_clob_client.http_helpers.helpers as _clob_http
-                _clob_http._http_client = _httpx.Client(http2=True, proxy=_proxy_url)
-                log.info("CLOB proxy active: %s…", _proxy_url[:50])
-            except Exception as _pe:
-                log.warning("CLOB proxy setup failed (check clob_https_proxy setting): %s", _pe)
-
+        apply_clob_proxy(getattr(self.settings, "clob_https_proxy", "") or "")
         try:
             st = self.settings.polymarket_signature_type
             funder = self.settings.wallet_address if st == 1 else None
-            self.clob = ClobClient(
-                host="https://clob.polymarket.com",
-                key=self.settings.polymarket_private_key,
-                chain_id=137,
+            self.clob = build_clob_client(
+                private_key=self.settings.polymarket_private_key,
                 signature_type=st,
                 funder=funder,
             )
-            creds = self.clob.create_or_derive_api_creds()
-            self.clob.set_api_creds(creds)
-            log.info("CLOB L2 auth OK")
+            log.info("CLOB V2 L2 auth OK")
         except Exception as e:
             log.exception("CLOB init failed")
             self.state.errors.append(f"Init: {e}")
@@ -173,7 +160,10 @@ class TradingBot:
         if self.clob is not None:
             try:
                 loop = asyncio.get_event_loop()
-                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                params = BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.settings.polymarket_signature_type,
+                )
                 resp = await loop.run_in_executor(
                     None, lambda: self.clob.get_balance_allowance(params=params)
                 )
