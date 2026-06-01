@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from bot.settings_validation import validate_and_normalize_settings_patch
+from bot.settings import Settings
+from bot.settings_validation import (
+    live_risk_caps_ok,
+    validate_and_normalize_settings_patch,
+)
 
 
 class TestSettingsValidation(unittest.TestCase):
@@ -54,6 +58,22 @@ class TestSettingsValidation(unittest.TestCase):
         self.assertFalse(err)
         self.assertIn("category_exposure_caps", norm)
         self.assertIn("copy_wallet_score_overrides", norm)
+
+
+class TestLiveRiskCapsOk(unittest.TestCase):
+    def test_dry_run_always_ok(self):
+        ok, reason = live_risk_caps_ok(Settings(dry_run=True))
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_live_all_caps_zero_blocked(self):
+        ok, reason = live_risk_caps_ok(Settings(dry_run=False))
+        self.assertFalse(ok)
+        self.assertIn("live trading blocked", reason)
+
+    def test_live_one_cap_nonzero_ok(self):
+        ok, _ = live_risk_caps_ok(Settings(dry_run=False, max_daily_notional_usd=100.0))
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

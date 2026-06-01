@@ -9,6 +9,29 @@ from bot.categories import MarketCategory
 from bot.settings import default_kv_seed
 from bot.validate import is_valid_polygon_address, is_valid_private_key_hex
 
+
+def live_risk_caps_ok(settings: Any) -> tuple[bool, str]:
+    """Fail-closed guard: live trading requires at least one positive exposure cap.
+
+    When dry_run is False and all of max_condition_exposure_usd /
+    max_category_exposure_usd / max_daily_notional_usd are <= 0, every exposure
+    gate is disabled (cap <= 0 means "off") -> unbounded exposure. Block the cycle.
+    Dry-run always passes.
+    """
+    if getattr(settings, "dry_run", True):
+        return True, ""
+    caps = (
+        float(getattr(settings, "max_condition_exposure_usd", 0.0) or 0.0),
+        float(getattr(settings, "max_category_exposure_usd", 0.0) or 0.0),
+        float(getattr(settings, "max_daily_notional_usd", 0.0) or 0.0),
+    )
+    if all(c <= 0 for c in caps):
+        return False, (
+            "live trading blocked: set at least one of max_condition_exposure_usd / "
+            "max_category_exposure_usd / max_daily_notional_usd > 0"
+        )
+    return True, ""
+
 BOOL_KEYS = {
     "dry_run",
     "strict_execution",

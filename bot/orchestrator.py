@@ -36,6 +36,7 @@ from bot.market_intel import hours_until_resolution_end
 from bot.orderbook import orderbook_buy_depth_ok, spread_mid_bps
 from bot.risk import gate_intent
 from bot.settings import Settings
+from bot.settings_validation import live_risk_caps_ok
 from bot.signals import intent_signal_boost
 from bot.sizing import pnl_aware_size_multiplier
 from bot.structured_log import slog
@@ -560,6 +561,13 @@ class TradingBot:
 
         await self.refresh_balance()
         await self.refresh_positions()
+
+        caps_ok, caps_reason = live_risk_caps_ok(self.settings)
+        if not caps_ok:
+            log.warning("live risk caps: %s — skipping cycle", caps_reason)
+            if caps_reason not in self.state.errors:
+                self.state.errors.append(caps_reason)
+            return
 
         reserve = max(0.0, float(self.settings.balance_buffer_usd))
         if self.clob and self.state.usdc_balance < self.settings.min_bet_usd + reserve:
