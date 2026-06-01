@@ -11,7 +11,7 @@ class FakeClient:
     def create_order(self, args, options=None): return {"args": args, "options": options}
     def post_order(self, signed, order_type): return self._post_resp
     def get_order(self, oid): return self._states.pop(0) if self._states else {"status": "LIVE"}
-    def cancel_order(self, oid): self.cancelled.append(oid); return {"canceled": [oid]}
+    def cancel_orders(self, hashes): self.cancelled.extend(hashes); return {"canceled": list(hashes)}
 
 def test_limit_fills_immediately():
     c = FakeClient(post_resp={"orderID": "abc"},

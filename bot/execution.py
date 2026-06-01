@@ -176,7 +176,7 @@ async def place_limit_gtd_then_wait(
         await asyncio.sleep(poll_s)
 
     try:
-        await asyncio.to_thread(client.cancel_order, oid)
+        await asyncio.to_thread(client.cancel_orders, [oid])
         log.info("Cancelled order %s after TTL", oid)
     except Exception as e:
         log.warning("cancel failed %s: %s", oid, e)

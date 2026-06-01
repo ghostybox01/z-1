@@ -20,6 +20,9 @@ if os.environ.get("PM_LIVE_SMOKE") != "1":
     print("skipped (set PM_LIVE_SMOKE=1 to run the live V2 smoke)")
     sys.exit(0)
 
+# Make the repo root importable regardless of CWD (script is run directly, not as a module).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import httpx
 
 from bot.db.bootstrap import init_database
@@ -42,32 +45,55 @@ funder = (kv.get("wallet_address") or None) if st == 1 else None
 client = build_clob_client(private_key=pk, signature_type=st, funder=funder)
 print(f"client built (sig_type={st}, funder={funder})")
 
-market = httpx.get(
+markets = httpx.get(
     "https://gamma-api.polymarket.com/markets",
     params={
-        "limit": 1,
+        "limit": 25,
         "active": "true",
         "closed": "false",
         "order": "liquidityClob",
         "ascending": "false",
     },
     timeout=30,
-).json()[0]
-tokens = market["clobTokenIds"]
-tokens = json.loads(tokens) if isinstance(tokens, str) else tokens
-print("market:", (market.get("question") or "")[:50])
+).json()
+
+
+def _best_ask(tok):
+    try:
+        gp = client.get_price(tok, "SELL")
+        return float(gp.get("price")) if isinstance(gp, dict) else float(gp)
+    except Exception:
+        return 0.0
+
+
+# Pick a NON-longshot market so a 0.01 bid rests (does not match) -> no real trade.
+token = None
+question = ""
+for m in markets:
+    toks = m.get("clobTokenIds")
+    toks = json.loads(toks) if isinstance(toks, str) else toks
+    if not toks:
+        continue
+    if _best_ask(toks[0]) >= 0.10:
+        token = toks[0]
+        question = m.get("question", "")
+        break
+
+if not token:
+    print("BLOCKED: no non-longshot market found to probe safely")
+    sys.exit(1)
+print("market:", question[:50], "(ask >= 0.10 -> 0.01 bid is non-marketable)")
 
 try:
     resp = client.create_and_post_order(
-        OrderArgs(token_id=tokens[0], price=0.01, size=100, side=BUY),
+        OrderArgs(token_id=token, price=0.01, size=5, side=BUY),
         order_type=OrderType.GTC,
     )
     print("POST_OK", resp)
-    oid = resp.get("orderID") or resp.get("order_id") if isinstance(resp, dict) else None
+    oid = (resp.get("orderID") or resp.get("order_id")) if isinstance(resp, dict) else None
     if oid:
-        client.cancel_order(oid)
-        print("cancelled", oid)
-    print("PASS: V2 order accepted and cancelled")
+        print("cancel:", client.cancel_orders([oid]))
+    print("PASS: V2 order accepted and cancelled (rested, no fill)")
 except Exception as e:
     s = repr(e)
     print("POST_ERR", s)
