@@ -30,6 +30,11 @@ log = logging.getLogger("polymarket.copy_manager")
 # How often to re-scan leaderboard (seconds). Default: every 6 hours.
 _DEFAULT_REFRESH_INTERVAL = 6 * 3600
 
+# E14c: maximum age of a cached wallet-quality stat before we MUST re-check
+# rather than reuse. Prevents the prune path from reusing day-old stats for
+# a wallet whose performance has just cratered.
+_CACHE_TTL_SECONDS = 600.0
+
 
 @dataclass
 class WalletStats:
@@ -225,7 +230,15 @@ class CopyManager:
             if st.status != "active":
                 continue
 
-            if st.last_checked and (now - st.last_checked) < skip_if_checked_within_s:
+            # E14c: only reuse cached stats if both the discovery-window
+            # heuristic AND a hard TTL still consider them fresh. Stale stats
+            # silently kept wallets active long after performance dropped.
+            cache_fresh = (
+                st.last_checked
+                and (now - st.last_checked) < skip_if_checked_within_s
+                and (now - st.last_checked) < _CACHE_TTL_SECONDS
+            )
+            if cache_fresh:
                 total = int(st.wins + st.losses)
                 if total >= min_trades and st.win_rate < prune_threshold:
                     st.status = "pruned"
@@ -237,12 +250,27 @@ class CopyManager:
                 continue
 
             try:
-                quality = await analyze_wallet_quality(http, w, limit=100)
+                quality = await analyze_wallet_quality(http, w, closed_limit=100)
             except Exception as e:
                 log.warning("quality check failed for %s: %s", w[:12], e)
                 continue
 
-            st.win_rate = quality["win_rate"]
+            # analyze_wallet_quality may now return win_rate=None when loss
+            # visibility is insufficient. Prune those wallets — we can't keep
+            # copying someone whose losing trades we cannot see.
+            new_wr = quality.get("win_rate")
+            if new_wr is None:
+                st.status = "pruned"
+                pruned += 1
+                st.last_checked = time.time()
+                log.info(
+                    "CopyManager PRUNED %s: win_rate unverifiable (loss_visibility=%s, active_rt=%d)",
+                    w[:12], quality.get("loss_visibility", "?"),
+                    quality.get("active_round_trips", 0),
+                )
+                continue
+
+            st.win_rate = new_wr
             st.wins = quality["wins"]
             st.losses = quality["losses"]
             st.max_streak = quality["max_streak"]
@@ -250,12 +278,12 @@ class CopyManager:
             st.total_pnl = quality["total_pnl"]
             st.last_checked = time.time()
 
-            if quality["total"] >= min_trades and quality["win_rate"] < prune_threshold:
+            if quality["total"] >= min_trades and new_wr < prune_threshold:
                 st.status = "pruned"
                 pruned += 1
                 log.info(
                     "CopyManager PRUNED %s: WR=%.0f%% < %.0f%% threshold",
-                    w[:12], quality["win_rate"] * 100, prune_threshold * 100,
+                    w[:12], new_wr * 100, prune_threshold * 100,
                 )
 
         self.state.total_pruned += pruned
