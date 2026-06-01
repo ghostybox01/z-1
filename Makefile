@@ -4,7 +4,7 @@ setup:
 	bash scripts/setup_workspace.sh
 
 test:
-	. .venv/bin/activate && python -m unittest discover -s tests -p 'test_*.py' -v
+	. .venv/bin/activate && python -m pytest tests/ -q
 
 run:
 	. .venv/bin/activate && python main.py
