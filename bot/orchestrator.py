@@ -856,6 +856,19 @@ class TradingBot:
                 if intent.token_id in self._geoblocked_tokens:
                     skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "geoblocked"})
                     continue
+                # Don't take both sides of one market. We've copied opposite sides of
+                # the same game handicap from two different whales before (one side
+                # always loses, bleeding spread+buffer for a near-wash). Skip if we
+                # already hold a different outcome token of the same condition_id.
+                if intent.condition_id and any(
+                    str(p.get("condition_id") or "") == intent.condition_id
+                    and str(p.get("token_id") or "") != intent.token_id
+                    and float(p.get("size") or 0) > 0
+                    for p in self.state.positions
+                ):
+                    skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "opposing_side_held"})
+                    log.info("skip intent: opposing side already held for cond %s…", str(intent.condition_id)[:14])
+                    continue
                 await self._apply_intent_multipliers(intent)
                 disp = self._dispersion_for_intent(intent, cex_map)
                 if not await self._orderbook_gate_passes(intent):
