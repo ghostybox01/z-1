@@ -32,6 +32,7 @@ from bot.models import BotState, TradeIntent, TradeRecord, utc_now_iso
 from bot.clob_utils import parse_midpoint
 from bot.reconcile import reconcile_trade_records_inplace, snapshot_open_orders
 from bot.db.kv import append_paper_trade_log, append_trade_log
+from bot.db.models import TradeLog, session_scope
 from bot.exposure import category_exposure_usd, condition_exposure_usd, rolling_notional_usd
 from bot.execution_plan import plan_execution_units
 from bot.market_intel import hours_until_resolution_end
@@ -156,11 +157,60 @@ class TradingBot:
             self.state.errors.append(f"Init: {e}")
             return False
 
+        # E3: rehydrate trade history from DB so the trade counter, dedupe, and
+        # rolling-notional cap survive restarts (reconcile only sees open CLOB
+        # orders; it cannot recover filled trades lost from in-memory state).
+        try:
+            await asyncio.to_thread(self.load_recent_trades)
+        except Exception as e:
+            log.warning("load_recent_trades failed on boot: %s", e)
         await self.refresh_balance()
         await self.refresh_positions()
         self.state.started_at = utc_now_iso()
         self.state.running = True
         return True
+
+    def load_recent_trades(self, *, max_rows: int = 200) -> int:
+        """Rehydrate state.trade_history from the trade_logs table on boot so the
+        trade counter, dedupe, and rolling-notional cap survive a restart.
+        Bounded to the most recent `max_rows` rows; exception-safe (returns 0)."""
+        from sqlalchemy import select
+        loaded: list[TradeRecord] = []
+        try:
+            with session_scope() as s:
+                rows = list(
+                    s.scalars(
+                        select(TradeLog).order_by(TradeLog.id.desc()).limit(int(max_rows))
+                    ).all()
+                )
+                rows.reverse()  # oldest-first, matching the live append order
+                for r in rows:
+                    ts = r.created_at.isoformat() if r.created_at else utc_now_iso()
+                    loaded.append(
+                        TradeRecord(
+                            order_id=str(r.order_id or ""),
+                            market_question=str(r.market_question or ""),
+                            condition_id=str(r.condition_id or ""),
+                            token_id=str(r.token_id or ""),
+                            side=str(r.side or ""),
+                            price=float(r.price or 0.0),
+                            size=float(r.size or 0.0),
+                            cost_usd=float(r.cost_usd or 0.0),
+                            status=str(r.status or ""),
+                            timestamp=ts,
+                            outcome=str(r.outcome or ""),
+                            strategy=str(r.strategy or ""),
+                            reconcile_note=r.reconcile_note,
+                        )
+                    )
+        except Exception as e:
+            log.warning("load_recent_trades query failed: %s", e)
+            return 0
+        self.state.trade_history = loaded
+        self.state.trades_placed = len(loaded)
+        self.state.trades_filled = sum(1 for t in loaded if "filled" in str(t.status or "").lower())
+        log.info("load_recent_trades: rehydrated %d trades from DB", len(loaded))
+        return len(loaded)
 
     async def refresh_balance(self):
         if not self.settings.wallet_address or not self._http:
