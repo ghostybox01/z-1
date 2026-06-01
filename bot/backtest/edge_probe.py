@@ -161,12 +161,14 @@ def run_edge_probe(
     client: Any,
     http: Any,
     *,
-    n_markets: int = 40,
-    interval: str = "1m",
+    n_markets: int = 150,
+    interval: str = "max",
     fidelity: int = 60,
     fee_bps: float = 0.0,
-    hold_horizon: int = 30,
-    fill_window: int = 10,
+    hold_horizon: int = 10,
+    fill_window: int = 5,
+    value_lo: float = 0.20,
+    value_hi: float = 0.45,
 ) -> dict:
     """Scan gamma for liquid binary markets, fetch price history, run replay_passive_bid,
     and AGGREGATE across markets into one ProbeResult-like dict plus per-market rows.
@@ -183,7 +185,7 @@ def run_edge_probe(
                 "limit": n_markets,
                 "active": "true",
                 "closed": "false",
-                "order": "liquidityClob",
+                "order": "volume",
                 "ascending": "false",
             },
         )
@@ -218,6 +220,23 @@ def run_edge_probe(
 
         yes_token = token_ids[0]
         if not yes_token:
+            continue
+
+        # Only probe markets currently in value_edge's trigger band (YES in [value_lo, value_hi]);
+        # liquidity-sorted longshots never fire the rule and just waste history fetches.
+        raw_prices = m.get("outcomePrices", m.get("outcome_prices", ""))
+        if isinstance(raw_prices, str):
+            try:
+                op = json.loads(raw_prices) if raw_prices.strip().startswith("[") else []
+            except (json.JSONDecodeError, ValueError):
+                op = []
+        else:
+            op = raw_prices if isinstance(raw_prices, list) else []
+        try:
+            cur_yes = float(op[0]) if op else None
+        except (TypeError, ValueError):
+            cur_yes = None
+        if cur_yes is None or not (value_lo <= cur_yes <= value_hi):
             continue
 
         prices = fetch_price_series(client, yes_token, interval=interval, fidelity=fidelity)
