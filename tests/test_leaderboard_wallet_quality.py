@@ -136,10 +136,11 @@ class RoundTripReconstruction(unittest.TestCase):
 
 
 class AnalyzeWalletQuality(unittest.TestCase):
-    def _run(self, trades, closed):
+    def _run(self, trades, closed, positions=None):
         http = _FakeHttp({
             "https://data-api.polymarket.com/trades": trades,
             "https://data-api.polymarket.com/closed-positions": closed,
+            "https://data-api.polymarket.com/positions": positions or [],
         })
         return asyncio.run(analyze_wallet_quality(http, "0xabc"))
 
@@ -187,6 +188,58 @@ class AnalyzeWalletQuality(unittest.TestCase):
         self.assertEqual(q["loss_visibility"], "verified")
         self.assertAlmostEqual(q["win_rate"], 2 / 3, places=4)
 
+    def test_buy_and_hold_positions_reveal_losses_and_win_rate(self):
+        """A buy-and-hold wallet with NO SELL round-trips (active loss-blind):
+        /trades only has BUYs, /closed-positions is empty, but /positions
+        exposes resolved held outcomes including LOSERS. With 3 resolved wins
+        (curPrice≈1, redeemable) and 2 resolved losers (curPrice≈0, redeemable)
+        the win rate becomes verifiable at 0.6."""
+        trades = [_t(float(i), f"hold_{i}", "BUY", 0.50, 100) for i in range(5)]
+        positions = [
+            # 3 resolved WINNERS (redeemable, curPrice ~1)
+            {"redeemable": True, "curPrice": 1.0, "cashPnl": 50.0, "title": "w1"},
+            {"redeemable": True, "curPrice": 0.99, "cashPnl": 49.0, "title": "w2"},
+            {"redeemable": True, "curPrice": 0.97, "cashPnl": 47.0, "title": "w3"},
+            # 2 resolved LOSERS (redeemable, curPrice ~0) — invisible to round-trips
+            {"redeemable": True, "curPrice": 0.0, "cashPnl": -50.0, "title": "l1"},
+            {"redeemable": True, "curPrice": 0.01, "cashPnl": -49.0, "title": "l2"},
+            # an UNRESOLVED open position must be ignored entirely
+            {"redeemable": False, "curPrice": 0.45, "cashPnl": -5.0, "title": "open"},
+        ]
+        q = self._run(trades, [], positions)
+        # Active side is loss-blind (no SELLs → no round-trips)
+        self.assertEqual(q["active_round_trips"], 0)
+        self.assertEqual(q["active_wins"], 0)
+        self.assertEqual(q["active_losses"], 0)
+        # /positions reveals the resolved outcomes
+        self.assertEqual(q["pos_resolved_wins"], 3)
+        self.assertEqual(q["pos_resolved_losses"], 2)
+        self.assertEqual(q["positions_seen"], 6)
+        # Folded into the verified picture
+        self.assertEqual(q["wins"], 3)
+        self.assertEqual(q["losses"], 2)
+        self.assertEqual(q["verified_total"], 5)
+        self.assertEqual(q["loss_visibility"], "verified")
+        self.assertAlmostEqual(q["win_rate"], 0.6, places=4)
+
+    def test_positions_resolved_loss_can_drag_win_rate_below_active_only(self):
+        """Active round-trips alone would read 100% (1 win, 0 losses), but
+        /positions surfaces a previously-invisible resolved loser, pulling the
+        verified win rate down to 0.5 and flipping visibility to 'verified'."""
+        trades = [
+            _t(1.0, "A", "BUY", 0.30, 100),
+            _t(2.0, "A", "SELL", 0.70, 100),  # one active WIN, no active losses
+        ]
+        positions = [
+            {"redeemable": True, "curPrice": 0.0, "cashPnl": -100.0, "title": "buryme"},
+        ]
+        q = self._run(trades, [], positions)
+        self.assertEqual(q["active_wins"], 1)
+        self.assertEqual(q["active_losses"], 0)
+        self.assertEqual(q["pos_resolved_losses"], 1)
+        self.assertEqual(q["loss_visibility"], "verified")
+        self.assertAlmostEqual(q["win_rate"], 0.5, places=4)
+
     def test_streak_across_mixed_sources_chronological(self):
         trades = [
             _t(10.0, "A", "BUY", 0.30, 100),
@@ -220,9 +273,11 @@ class AnalyzeWalletQuality(unittest.TestCase):
 class DiscoverQualifiedWallets(unittest.TestCase):
     """End-to-end gating tests through the public discover_qualified_wallets."""
 
-    def _run(self, leaderboard_resp, trades_by_user, closed_by_user):
-        # Build a fake http that routes by URL; closed/trades vary per user via
-        # the params dict. We intercept ``get`` and switch on the user param.
+    def _run(self, leaderboard_resp, trades_by_user, closed_by_user, positions_by_user=None):
+        # Build a fake http that routes by URL; closed/trades/positions vary per
+        # user via the params dict. We intercept ``get`` and switch on the user
+        # param.
+        positions_by_user = positions_by_user or {}
         class Http:
             async def get(self, url, params=None, **kwargs):
                 user = (params or {}).get("user", "")
@@ -232,6 +287,8 @@ class DiscoverQualifiedWallets(unittest.TestCase):
                     return _FakeResp(trades_by_user.get(user, []))
                 if url.endswith("/closed-positions"):
                     return _FakeResp(closed_by_user.get(user, []))
+                if url.endswith("/positions"):
+                    return _FakeResp(positions_by_user.get(user, []))
                 return _FakeResp([])
 
         return asyncio.run(discover_qualified_wallets(
@@ -284,6 +341,46 @@ class DiscoverQualifiedWallets(unittest.TestCase):
             trades.append(_t(ts, f"loss_{i}", "BUY", 0.60, 100)); ts += 1
             trades.append(_t(ts, f"loss_{i}", "SELL", 0.40, 100)); ts += 1
         qualified = self._run(lb, {w: trades}, {w: []})
+        self.assertEqual(qualified, [])
+
+    def test_positions_losses_qualify_wallet_with_verified_win_rate(self):
+        """/positions resolved outcomes fold into the verified win-rate that
+        flows through the gate. Active round-trips (4 wins, 1 loss) clear the
+        streak gate; /positions adds 1 more resolved win → 5W/1L = ~83%, still
+        above the 60% bar, and the wallet qualifies with that combined rate."""
+        w = "0x" + "e" * 40
+        lb = [{"proxyWallet": w, "rank": 1, "pnl": 5e3, "vol": 5e4, "userName": "holder"}]
+        trades = []
+        ts = 0.0
+        for i in range(4):
+            trades.append(_t(ts, f"win_{i}", "BUY", 0.30, 100)); ts += 1
+            trades.append(_t(ts, f"win_{i}", "SELL", 0.70, 100)); ts += 1
+        trades.append(_t(ts, "loss_0", "BUY", 0.60, 100)); ts += 1
+        trades.append(_t(ts, "loss_0", "SELL", 0.40, 100)); ts += 1
+        positions = [{"redeemable": True, "curPrice": 1.0, "cashPnl": 60.0}]
+        qualified = self._run(lb, {w: trades}, {w: []}, {w: positions})
+        self.assertEqual(len(qualified), 1)
+        self.assertEqual(qualified[0]["pos_resolved_wins"], 1)
+        self.assertEqual(qualified[0]["loss_visibility"], "verified")
+        # 5 verified wins / 6 verified total
+        self.assertAlmostEqual(qualified[0]["win_rate"], 5 / 6, places=4)
+
+    def test_positions_losses_drag_wallet_below_win_rate_bar(self):
+        """The whole point: /positions can DRAG a wallet under the bar. Active
+        round-trips alone read 4W/1L (80%, would qualify), but /positions
+        surfaces 3 previously-invisible resolved losers → 4W/4L = 50%, below the
+        60% gate, so the wallet is now rejected."""
+        w = "0x" + "f" * 40
+        lb = [{"proxyWallet": w, "rank": 1, "pnl": 5e3, "vol": 5e4, "userName": "hidden_losses"}]
+        trades = []
+        ts = 0.0
+        for i in range(4):
+            trades.append(_t(ts, f"win_{i}", "BUY", 0.30, 100)); ts += 1
+            trades.append(_t(ts, f"win_{i}", "SELL", 0.70, 100)); ts += 1
+        trades.append(_t(ts, "loss_0", "BUY", 0.60, 100)); ts += 1
+        trades.append(_t(ts, "loss_0", "SELL", 0.40, 100)); ts += 1
+        positions = [{"redeemable": True, "curPrice": 0.0, "cashPnl": -60.0} for _ in range(3)]
+        qualified = self._run(lb, {w: trades}, {w: []}, {w: positions})
         self.assertEqual(qualified, [])
 
     def test_truncated_but_large_sample_can_qualify_with_higher_bar(self):

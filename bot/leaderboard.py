@@ -14,11 +14,14 @@ Data-source notes (verified empirically on 2026-05-19):
 Wallet quality is a **multi-source decision**:
   1. Active round-trips from /trades give us verifiable wins AND losses.
   2. /closed-positions gives us a recent slice of resolved wins (filtered, capped).
-  3. Leaderboard PnL is the authoritative total.
+  3. /positions gives us RESOLVED held outcomes including LOSERS — buy-and-hold
+     losses that never produce a SELL and so are invisible to round-trips.
+  4. Leaderboard PnL is the authoritative total.
 
-A wallet only qualifies when we have enough loss visibility (≥2 verified losses
-from round-trips OR ≥20 resolved wins for large-sample confidence). Anything
-else risks copying a wallet whose losing trades we simply cannot see.
+A wallet only qualifies when we have enough loss visibility (≥1 verified loss
+from round-trips or resolved held outcomes, OR ≥20 resolved wins for
+large-sample confidence). Anything else risks copying a wallet whose losing
+trades we simply cannot see.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ log = logging.getLogger("polymarket.leaderboard")
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard"
 CLOSED_POSITIONS_URL = "https://data-api.polymarket.com/closed-positions"
 TRADES_URL = "https://data-api.polymarket.com/trades"
+POSITIONS_URL = "https://data-api.polymarket.com/positions"
 
 CLOSED_POSITIONS_SERVER_CAP = 50
 _PNL_EPSILON = 1e-6
@@ -228,28 +232,41 @@ async def analyze_wallet_quality(
 ) -> dict[str, Any]:
     """Multi-source wallet quality analysis.
 
-    Combines /trades (full BUY/SELL → active round-trips with real wins AND
-    losses) with /closed-positions (recent resolved winners, server-capped at 50,
-    server-filtered to wins only). Returns a dict containing the same
-    backward-compatible keys as before plus richer quality signals:
+    Combines three data sources:
+      * /trades — full BUY/SELL → active round-trips with real wins AND losses.
+      * /closed-positions — recent resolved winners (server-capped at 50,
+        server-filtered to wins only).
+      * /positions — RESOLVED held outcomes including LOSERS (a ``redeemable``
+        row with ``curPrice``≈0 is a buy-and-hold loss the SELL-based round-trip
+        view can never see). This is what makes the win-rate no longer
+        loss-blind for buy-and-hold wallets.
+
+    Returns a dict containing the same backward-compatible keys as before plus
+    richer quality signals:
 
       Backward-compatible:
         wallet, total, wins, losses, win_rate, current_streak, max_streak,
         total_pnl, avg_win, avg_loss
+      (wins/losses/verified_total now reflect the broader VERIFIED picture:
+       active round-trips PLUS resolved held outcomes from /positions.)
 
       New (data-quality signals):
         active_round_trips         — completed BUY→SELL pairs (verified)
         active_wins, active_losses — round-trip outcomes
         resolved_wins              — from /closed-positions (filtered to wins)
+        pos_resolved_wins          — resolved held WINS from /positions
+        pos_resolved_losses        — resolved held LOSSES from /positions
+        positions_seen             — rows returned by /positions
         observed_total_pnl         — sum of round-trip pnl + closed-position pnl
         data_truncation_risk       — True iff closed-positions returned >= cap
         loss_visibility            — "verified" | "partial" | "none"
-        verified_total             — active wins + active losses (only what we
-                                     can verify both sides of)
+        verified_total             — verified wins + verified losses (active
+                                     round-trips + resolved held outcomes)
         open_position_count        — assets still in inventory after walk
 
-    ``win_rate`` semantics (changed): computed from VERIFIED outcomes only
-    (active round-trips). If we cannot observe at least one loss AND the
+    ``win_rate`` semantics: computed from VERIFIED wins AND losses, where
+    "verified" now spans active round-trips and resolved held outcomes from
+    /positions. If we still cannot observe at least one loss AND the
     resolved-wins sample is small (<20), ``win_rate`` is set to ``None`` so the
     caller's gate can reject the wallet rather than treat zero observed losses
     as 100% performance.
@@ -262,9 +279,15 @@ async def analyze_wallet_quality(
     trade_lim = max(1, min(500, trade_limit))
     closed_lim = max(1, min(500, closed_limit))
 
-    trades_raw, closed_raw = await asyncio.gather(
+    trades_raw, closed_raw, positions_raw = await asyncio.gather(
         _safe_fetch(http, TRADES_URL, {"user": w, "limit": str(trade_lim)}, f"trades {w[:12]}"),
         _safe_fetch(http, CLOSED_POSITIONS_URL, {"user": w, "limit": str(closed_lim)}, f"closed-positions {w[:12]}"),
+        _safe_fetch(
+            http,
+            POSITIONS_URL,
+            {"user": w, "limit": "500", "sortBy": "CASHPNL", "sortDirection": "ASC"},
+            f"positions {w[:12]}",
+        ),
     )
 
     # --- Active round-trips (verified wins AND losses) ----------------------
@@ -294,25 +317,52 @@ async def analyze_wallet_quality(
 
     data_truncation_risk = len(closed_raw) >= CLOSED_POSITIONS_SERVER_CAP
 
+    # --- Resolved HELD outcomes from /positions (wins AND losses) -----------
+    # Unlike /closed-positions (server-filtered to wins only), the /positions
+    # endpoint returns resolved buy-and-hold outcomes including LOSERS. A
+    # position is resolved when ``redeemable`` is truthy; its outcome is read
+    # from ``curPrice`` (≈1 for a winning held outcome, ≈0 for a loser).
+    pos_resolved_wins = 0
+    pos_resolved_losses = 0
+    for p in positions_raw:
+        if not p.get("redeemable"):
+            continue
+        try:
+            cur = float(p.get("curPrice") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cur >= 0.5:
+            pos_resolved_wins += 1
+        else:
+            pos_resolved_losses += 1
+
+    # --- Verified picture (active round-trips + resolved held outcomes) ------
+    # This is the broader "both sides visible" view. /positions now lets us see
+    # buy-and-hold LOSERS that were previously invisible, so a wallet's losses
+    # can no longer hide behind a SELL-less trading style.
+    verified_wins = active_wins + pos_resolved_wins
+    verified_losses = active_losses + pos_resolved_losses
+
     # --- Loss visibility verdict --------------------------------------------
-    if active_losses > 0:
+    if verified_losses > 0:
         loss_visibility = "verified"
-    elif (active_wins + resolved_wins) >= 20:
+    elif (verified_wins + resolved_wins) >= 20:
         # Large-sample confidence even without observed losses
         loss_visibility = "partial"
     else:
         loss_visibility = "none"
 
-    # --- Win rate (verified only) -------------------------------------------
-    verified_total = active_wins + active_losses
+    # --- Win rate (verified wins AND losses) --------------------------------
+    verified_total = verified_wins + verified_losses
     if verified_total == 0:
-        # No round-trips at all — wallet is buy-and-hold-to-resolution. We
-        # cannot compute a verifiable win rate; signal None so callers reject.
+        # Nothing verifiable on either side — wallet is buy-and-hold with no
+        # resolved outcomes yet. We cannot compute a verifiable win rate;
+        # signal None so callers reject.
         win_rate: float | None = None
     elif loss_visibility == "none":
         win_rate = None
     else:
-        win_rate = active_wins / verified_total
+        win_rate = verified_wins / verified_total
 
     # --- Streaks (chronological merge of round-trips + resolved closes) -----
     merged: list[tuple[float, float]] = [(rt["ts"], rt["pnl"]) for rt in round_trips]
@@ -332,9 +382,15 @@ async def analyze_wallet_quality(
         # pnl == 0 neither extends nor breaks a streak
 
     # --- Backward-compatible aggregates -------------------------------------
-    total = verified_total + resolved_wins  # what the old field meant
-    wins = active_wins + resolved_wins
-    losses = active_losses
+    # wins/losses/verified_total now reflect the broader VERIFIED picture
+    # (active round-trips + resolved held outcomes from /positions). ``total``
+    # additionally folds in resolved-wins from /closed-positions for the
+    # sample-size gate. resolved_wins (closed-positions) and pos_resolved_wins
+    # (/positions) can overlap on the same conditionId, so ``total`` is an
+    # upper-bound sample count, not a disjoint sum.
+    wins = verified_wins
+    losses = verified_losses
+    total = verified_total + resolved_wins  # sample-size signal for the gate
     win_pnls = [rt["pnl"] for rt in round_trips if rt["pnl"] > _PNL_EPSILON]
     loss_pnls = [rt["pnl"] for rt in round_trips if rt["pnl"] < -_PNL_EPSILON]
     observed_total_pnl = active_pnl + resolved_pnl
@@ -398,6 +454,9 @@ async def analyze_wallet_quality(
         "active_wins": active_wins,
         "active_losses": active_losses,
         "resolved_wins": resolved_wins,
+        "pos_resolved_wins": pos_resolved_wins,
+        "pos_resolved_losses": pos_resolved_losses,
+        "positions_seen": len(positions_raw),
         "observed_total_pnl": observed_total_pnl,
         "leaderboard_pnl": leaderboard_pnl,
         "data_truncation_risk": data_truncation_risk,
