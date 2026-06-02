@@ -297,7 +297,13 @@ class TradingBot:
             log.warning("positions API: %s", e)
             return
 
-        if not self._market_cache and self.clob:
+        # Market-name fallback only — and only worth a full scan if a scanning agent
+        # is active. In copy-only mode we rely on the /positions title instead, so the
+        # name lookup never triggers the slow scan.
+        if not self._market_cache and self.clob and (
+            self.settings.agent_value or self.settings.agent_latency
+            or self.settings.agent_bundle or self.settings.agent_zscore
+        ):
             await self._gamma_scan()
 
         our_tokens = {str(t.token_id) for t in self.state.trade_history if getattr(t, "token_id", "")}
@@ -645,7 +651,15 @@ class TradingBot:
             log.warning("Balance below min bet + buffer")
             return
 
-        markets = await self._gamma_scan()
+        # Only the market-scanning agents (value/latency/bundle/zscore) consume the
+        # ~1.5k-market Gamma scan; copy-trading uses the /activity stream instead.
+        # Skip the scan when none of those agents are active so the copy cycle stays
+        # fast (seconds, not minutes) and the disabled agents can't slow it down.
+        need_scan = bool(self.clob) and (
+            self.settings.agent_value or self.settings.agent_latency
+            or self.settings.agent_bundle or self.settings.agent_zscore
+        )
+        markets = await self._gamma_scan() if need_scan else []
         pos_tokens = {p["token_id"] for p in self.state.positions}
 
         agent_tasks: list[tuple[str, asyncio.Task]] = []
