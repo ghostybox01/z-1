@@ -89,6 +89,11 @@ def default_kv_seed() -> dict[str, str]:
         "agent_latency": "false",
         "agent_bundle": "false",
         "agent_zscore": "false",
+        "agent_weather": "false",
+        "weather_min_edge": "0.12",
+        "weather_sigma": "1.6",
+        "weather_min_volume_24h": "500.0",
+        "weather_max_markets_per_cycle": "5",
         "latency_min_dislocation_bps": "120",
         "bundle_max_pair_cost": "0.994",
         "bundle_min_liquidity_usd": "1500",
@@ -228,6 +233,11 @@ class Settings:
     agent_latency: bool = False
     agent_bundle: bool = False
     agent_zscore: bool = False
+    agent_weather: bool = False
+    weather_min_edge: float = 0.12
+    weather_sigma: float = 1.6
+    weather_min_volume_24h: float = 500.0
+    weather_max_markets_per_cycle: int = 5
     latency_min_dislocation_bps: float = 120.0
     bundle_max_pair_cost: float = 0.994
     bundle_min_liquidity_usd: float = 1500.0
@@ -463,6 +473,11 @@ class Settings:
             agent_latency=_b(g("agent_latency", "false"), False),
             agent_bundle=_b(g("agent_bundle", "false"), False),
             agent_zscore=_b(g("agent_zscore", "false"), False),
+            agent_weather=_b(g("agent_weather", "false"), False),
+            weather_min_edge=_f(g("weather_min_edge", "0.12"), 0.12),
+            weather_sigma=_f(g("weather_sigma", "1.6"), 1.6),
+            weather_min_volume_24h=_f(g("weather_min_volume_24h", "500.0"), 500.0),
+            weather_max_markets_per_cycle=_i(g("weather_max_markets_per_cycle", "5"), 5),
             latency_min_dislocation_bps=_f(g("latency_min_dislocation_bps", "120"), 120.0),
             bundle_max_pair_cost=_f(g("bundle_max_pair_cost", "0.994"), 0.994),
             bundle_min_liquidity_usd=_f(g("bundle_min_liquidity_usd", "1500"), 1500.0),

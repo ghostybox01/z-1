@@ -45,6 +45,12 @@ AGENTS: tuple[AgentInfo, ...] = (
         short="Rolling z-score on YES mid per market; mean-reversion BUY on stretched YES or NO.",
         priority=48,
     ),
+    AgentInfo(
+        id="weather_arb",
+        title="Weather arb",
+        short="Compares Open-Meteo GFS forecast to Polymarket temperature markets; BUY YES/NO when forecast edge > threshold.",
+        priority=90,
+    ),
 )
 
 
@@ -71,6 +77,7 @@ def agents_status(
         "latency_arb": bool(getattr(settings, "agent_latency", False)),
         "bundle_arb": bool(getattr(settings, "agent_bundle", False)),
         "zscore_edge": bool(getattr(settings, "agent_zscore", False)),
+        "weather_arb": bool(getattr(settings, "agent_weather", False)),
     }
     config_notes: dict[str, str] = {}
     if getattr(settings, "agent_copy", False) and not getattr(settings, "copy_watch_wallets", []):

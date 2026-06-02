@@ -20,6 +20,7 @@ from bot.agents.copy_signal import CopySignalAgent
 from bot.agents.latency_arb import LatencyArbAgent
 from bot.agents.registry import agents_status
 from bot.agents.value_edge import ValueEdgeAgent
+from bot.agents.weather_arb import WeatherArbAgent
 from bot.agents.zscore_edge import ZScoreEdgeAgent
 from bot.copy_manager import CopyManager
 from bot.ev_math import copy_ev
@@ -72,6 +73,7 @@ class TradingBot:
         self._latency_agent = LatencyArbAgent(self.settings)
         self._bundle_agent = BundleArbAgent(self.settings)
         self._zscore_agent = ZScoreEdgeAgent(self.settings)
+        self._weather_agent = WeatherArbAgent(self.settings)
         self._copy_manager = CopyManager(self.settings)
         self._paper_portfolio = PaperPortfolio()
         # Per-session geoblock blocklist: markets that returned 403 are skipped automatically
@@ -107,6 +109,7 @@ class TradingBot:
         self._latency_agent.settings = self.settings
         self._bundle_agent.settings = self.settings
         self._zscore_agent.settings = self.settings
+        self._weather_agent.settings = self.settings
         self._copy_manager.sync_settings(self.settings)
 
     async def _rate_limit(self):
@@ -680,6 +683,9 @@ class TradingBot:
         if copy_scheduled:
             agent_tasks.append(("copy_signal", asyncio.ensure_future(
                 self._copy_agent.propose(self._http))))
+        if self.settings.agent_weather:
+            agent_tasks.append(("weather_arb", asyncio.ensure_future(
+                self._weather_agent.propose(self._http))))
 
         tasks = [t for _, t in agent_tasks]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -687,7 +693,7 @@ class TradingBot:
 
         runtime: dict[str, dict[str, Any]] = {}
         scheduled_ids = {aid for aid, _ in agent_tasks}
-        for aid in ("value_edge", "latency_arb", "bundle_arb", "zscore_edge", "copy_signal"):
+        for aid in ("value_edge", "latency_arb", "bundle_arb", "zscore_edge", "copy_signal", "weather_arb"):
             runtime[aid] = {"scheduled": aid in scheduled_ids, "ran": False, "intents": 0, "note": ""}
 
         if not self.clob:
@@ -715,6 +721,9 @@ class TradingBot:
             runtime["copy_signal"]["note"] = note
         elif self.settings.agent_copy and not self.settings.copy_watch_wallets:
             runtime["copy_signal"]["note"] = "enabled but no wallets configured"
+
+        if self.settings.agent_weather:
+            runtime["weather_arb"]["note"] = getattr(self._weather_agent, "last_note", "")
 
         self.state.cycle_agent_runtime = runtime
         for aid, info in runtime.items():
