@@ -119,6 +119,9 @@ def default_kv_seed() -> dict[str, str]:
         "copy_discover_categories": '["OVERALL","CRYPTO","SPORTS","POLITICS","FINANCE"]',
         "copy_wallet_score_overrides": "{}",
         "copy_allow_unknown_outcome": "true",
+        "copy_max_price_drift_bps": "200",
+        "copy_min_conviction_ratio": "0.3",
+        "copy_skip_averaging_down": "true",
         "copy_allowed_categories": "[]",
         "copy_allowed_outcomes": "[]",
         "copy_required_keywords": "[]",
@@ -259,6 +262,10 @@ class Settings:
     copy_allowed_outcomes: list[str] = field(default_factory=list)
     copy_required_keywords: list[str] = field(default_factory=list)
     copy_blocked_keywords: list[str] = field(default_factory=list)
+    # Sprint 2: signal-quality gates
+    copy_max_price_drift_bps: float = 200.0
+    copy_min_conviction_ratio: float = 0.3
+    copy_skip_averaging_down: bool = True
 
     cex_gate_crypto: bool = True
     max_cex_dispersion_bps: float = 25.0
@@ -490,6 +497,9 @@ class Settings:
             copy_allowed_outcomes=json_list_lower("copy_allowed_outcomes"),
             copy_required_keywords=json_list_lower("copy_required_keywords"),
             copy_blocked_keywords=json_list_lower("copy_blocked_keywords"),
+            copy_max_price_drift_bps=_f(g("copy_max_price_drift_bps", "200"), 200.0),
+            copy_min_conviction_ratio=_f(g("copy_min_conviction_ratio", "0.3"), 0.3),
+            copy_skip_averaging_down=_b(g("copy_skip_averaging_down", "true"), True),
             cex_gate_crypto=_b(g("cex_gate_crypto", "true"), True),
             max_cex_dispersion_bps=_f(g("max_cex_dispersion_bps", "25"), 25.0),
             category_flags=flags,

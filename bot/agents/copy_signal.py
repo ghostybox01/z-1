@@ -7,18 +7,20 @@ from __future__ import annotations
 
 import logging
 import time
+from statistics import median
 from typing import Any, Set
 
 import httpx
 
 from bot.categories import MarketCategory
-from bot.copy_rules import build_candidate, limit_price_with_buffer, passes_filters, wallet_score
+from bot.copy_rules import build_candidate, extract_token_id, limit_price_with_buffer, passes_filters, wallet_score
 from bot.http_retry import get_json_retry
 from bot.models import TradeIntent
 
 log = logging.getLogger("polymarket.agent.copy")
 
 ACTIVITY_URL = "https://data-api.polymarket.com/activity"
+CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 
 
 class CopySignalAgent:
@@ -48,9 +50,14 @@ class CopySignalAgent:
         candidates_filter_rejected = 0
         candidates_market_capped = 0
         candidates_stale_skipped = 0
+        candidates_price_drifted = 0
+        candidates_low_conviction = 0
+        candidates_avg_down_skipped = 0
         api_errors = 0
         cycle_markets: dict[str, int] = {}
         max_per_market = 2
+        # Gate 1: cache per-cycle CLOB asks to avoid redundant fetches
+        _clob_ask_cache: dict[str, float] = {}
 
         for wallet in self.settings.copy_watch_wallets:
             try:
@@ -68,6 +75,15 @@ class CopySignalAgent:
                 continue
 
             wallets_polled += 1
+
+            # Gate 2: pre-compute the wallet's median buy size once per wallet iteration
+            _buy_sizes = [
+                float(e.get("usdcSize") or e.get("amount") or 0)
+                for e in rows
+                if str(e.get("side", "")).upper() == "BUY"
+                and float(e.get("usdcSize") or e.get("amount") or 0) > 0
+            ]
+            wallet_median_usd = median(_buy_sizes) if _buy_sizes else 1.0
 
             score, parts = wallet_score(
                 rows if isinstance(rows, list) else [],
@@ -113,6 +129,32 @@ class CopySignalAgent:
                         candidates_stale_skipped += 1
                         continue
 
+                # Gate 2: conviction ratio — skip low-conviction noise trades
+                min_conviction = float(getattr(self.settings, "copy_min_conviction_ratio", 0.3))
+                if min_conviction > 0 and wallet_median_usd > 0:
+                    ratio = c.usdc / wallet_median_usd
+                    if ratio < min_conviction:
+                        candidates_low_conviction += 1
+                        continue
+
+                # Gate 3: averaging-down detection — skip if whale recently sold same token
+                if bool(getattr(self.settings, "copy_skip_averaging_down", True)):
+                    cutoff_ts = time.time() - 48 * 3600
+                    _is_avg_down = False
+                    for e in rows:
+                        if str(e.get("side", "")).upper() == "SELL" and extract_token_id(e) == c.token_id:
+                            try:
+                                raw_ts = e.get("timestamp")
+                                e_ts = float(raw_ts) if raw_ts is not None else 0.0
+                            except (TypeError, ValueError):
+                                e_ts = 0.0
+                            if e_ts >= cutoff_ts:
+                                _is_avg_down = True
+                                break
+                    if _is_avg_down:
+                        candidates_avg_down_skipped += 1
+                        continue
+
                 ok, _reason = passes_filters(self.settings, c)
                 if not ok:
                     candidates_filter_rejected += 1
@@ -122,6 +164,30 @@ class CopySignalAgent:
                 if cycle_markets[market_key] > max_per_market:
                     candidates_market_capped += 1
                     continue
+
+                # Gate 1: whale price-impact detection — skip if CLOB ask has drifted
+                max_drift_bps = float(getattr(self.settings, "copy_max_price_drift_bps", 200.0))
+                if max_drift_bps > 0:
+                    if c.token_id not in _clob_ask_cache:
+                        try:
+                            book = await get_json_retry(
+                                http,
+                                CLOB_BOOK_URL,
+                                params={"token_id": c.token_id},
+                            )
+                            asks = book.get("asks", []) if isinstance(book, dict) else []
+                            if asks:
+                                best_ask = min(float(a["price"]) for a in asks if a.get("price"))
+                                _clob_ask_cache[c.token_id] = best_ask
+                        except Exception:
+                            pass  # fail-open: don't skip on fetch error
+                    current_ask = _clob_ask_cache.get(c.token_id)
+                    if current_ask is not None and c.price > 0:
+                        drift_bps = ((current_ask - c.price) / c.price) * 10_000
+                        if drift_bps > max_drift_bps:
+                            candidates_price_drifted += 1
+                            continue
+
                 max_px = limit_price_with_buffer(self.settings, c.price)
                 usdc = max(self.settings.min_bet_usd, min(self.settings.max_bet_usd, c.usdc))
                 # Polymarket enforces a 5-share minimum order; estimate the real cost
@@ -176,6 +242,12 @@ class CopySignalAgent:
             parts_list.append(f"filtered={candidates_filter_rejected}")
         if candidates_stale_skipped:
             parts_list.append(f"stale={candidates_stale_skipped}")
+        if candidates_price_drifted:
+            parts_list.append(f"price_drifted={candidates_price_drifted}")
+        if candidates_low_conviction:
+            parts_list.append(f"low_conviction={candidates_low_conviction}")
+        if candidates_avg_down_skipped:
+            parts_list.append(f"avg_down={candidates_avg_down_skipped}")
         if candidates_market_capped:
             parts_list.append(f"mkt_cap={candidates_market_capped}")
         if api_errors:
