@@ -1213,7 +1213,19 @@ class TradingBot:
             except Exception as e:
                 log.exception("cycle")
                 self.state.errors.append(f"cycle: {e}")
-            await asyncio.sleep(self.settings.scan_interval_seconds)
+            # Pace the loop to the fastest active agent. Copy-trading reacts to the
+            # /activity stream and wants a short poll; the market-scanning agents only
+            # need the slower scan interval. In copy-only mode this makes copy react in
+            # ~seconds instead of waiting a full scan interval (the scan is skipped too).
+            need_scan = (
+                self.settings.agent_value or self.settings.agent_latency
+                or self.settings.agent_bundle or self.settings.agent_zscore
+            )
+            if self.settings.agent_copy and not need_scan:
+                sleep_s = float(self.settings.copy_poll_seconds or 15.0)
+            else:
+                sleep_s = float(self.settings.scan_interval_seconds or 120.0)
+            await asyncio.sleep(max(2.0, sleep_s))
 
     def stop(self):
         self._running = False
