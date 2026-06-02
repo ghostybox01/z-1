@@ -110,6 +110,9 @@ def default_kv_seed() -> dict[str, str]:
         "copy_min_account_age_days": "30",
         "copy_min_profit_factor": "1.5",
         "copy_min_ev": "0.02",
+        "copy_max_hours_to_resolution": "720",
+        "copy_min_hours_to_resolution": "4",
+        "copy_min_expected_profit_usd": "0.15",
         "copy_auto_manage": "true",
         "copy_refresh_interval_hours": "6",
         "copy_max_watched_wallets": "50",
@@ -243,6 +246,9 @@ class Settings:
     copy_min_account_age_days: float = 30.0
     copy_min_profit_factor: float = 1.5
     copy_min_ev: float = 0.02
+    copy_max_hours_to_resolution: float = 720.0
+    copy_min_hours_to_resolution: float = 4.0
+    copy_min_expected_profit_usd: float = 0.15
     copy_auto_manage: bool = True
     copy_refresh_interval_hours: float = 6.0
     copy_max_watched_wallets: int = 50
@@ -471,6 +477,9 @@ class Settings:
             copy_min_account_age_days=_f(g("copy_min_account_age_days", "30"), 30.0),
             copy_min_profit_factor=_f(g("copy_min_profit_factor", "1.5"), 1.5),
             copy_min_ev=_f(g("copy_min_ev", "0.02"), 0.02),
+            copy_max_hours_to_resolution=_f(g("copy_max_hours_to_resolution", "720"), 720.0),
+            copy_min_hours_to_resolution=_f(g("copy_min_hours_to_resolution", "4"), 4.0),
+            copy_min_expected_profit_usd=_f(g("copy_min_expected_profit_usd", "0.15"), 0.15),
             copy_auto_manage=_b(g("copy_auto_manage", "true"), True),
             copy_refresh_interval_hours=_f(g("copy_refresh_interval_hours", "6"), 6.0),
             copy_max_watched_wallets=_i(g("copy_max_watched_wallets", "50"), 50),
@@ -585,6 +594,9 @@ class Settings:
             "copy_max_loss_streak": self.copy_max_loss_streak,
             "copy_min_total_trades": self.copy_min_total_trades,
             "copy_min_ev": self.copy_min_ev,
+            "copy_max_hours_to_resolution": self.copy_max_hours_to_resolution,
+            "copy_min_hours_to_resolution": self.copy_min_hours_to_resolution,
+            "copy_min_expected_profit_usd": self.copy_min_expected_profit_usd,
             "copy_auto_manage": self.copy_auto_manage,
             "copy_refresh_interval_hours": self.copy_refresh_interval_hours,
             "copy_max_watched_wallets": self.copy_max_watched_wallets,

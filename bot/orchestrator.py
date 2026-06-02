@@ -884,10 +884,38 @@ class TradingBot:
                     skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "opposing_side_held"})
                     log.info("skip intent: opposing side already held for cond %s…", str(intent.condition_id)[:14])
                     continue
+                # Re-entry guard (copy intents only): skip if we already hold this
+                # exact token (same token_id, non-zero size). Prevents stacking into
+                # a position we already copied from a prior cycle.
+                if intent.strategy == "copy_trade" and any(
+                    str(p.get("token_id") or "") == intent.token_id
+                    and float(p.get("size") or 0) > 0
+                    for p in self.state.positions
+                ):
+                    skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "already_held_token"})
+                    log.info("skip intent: copy token already held (%s…)", intent.token_id[:16])
+                    continue
+                # Time-to-resolution gate (copy intents only).
+                # Min 4h: too close to resolution for a follower to get good execution.
+                # Max copy_max_hours_to_resolution (default 720h/30d): don't tie up
+                # capital in ultra-long-horizon markets whose outcome is too uncertain.
+                if intent.strategy == "copy_trade" and intent.hours_to_resolution is not None:
+                    _h = intent.hours_to_resolution
+                    _min_h = float(getattr(self.settings, "copy_min_hours_to_resolution", 4.0) or 4.0)
+                    _max_h = float(getattr(self.settings, "copy_max_hours_to_resolution", 720.0) or 720.0)
+                    if _h < _min_h:
+                        skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": f"copy_resolves_too_soon_{_h:.1f}h"})
+                        log.info("skip intent: copy resolves in %.1fh < %.0fh floor", _h, _min_h)
+                        continue
+                    if _max_h > 0 and _h > _max_h:
+                        skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": f"copy_resolves_too_far_{_h:.0f}h"})
+                        log.info("skip intent: copy resolves in %.0fh > %.0fh cap", _h, _max_h)
+                        continue
                 # EV-at-our-entry gate (copy intents only). We pay a follow-buffer
                 # (copy_price_buffer_bps) so a trade the whale profits on can be -EV
                 # for us. Using the source wallet's win rate as the success prob,
                 # skip copies whose EV per $1 (held to resolution) is below the floor.
+                # Also gate on minimum absolute expected profit so tiny bets stay out.
                 if intent.strategy == "copy_trade":
                     p = self._copy_manager.get_wallet_winrate(getattr(intent, "source_wallet", ""))
                     entry = float(intent.max_price)  # already includes the follow-buffer
@@ -900,6 +928,14 @@ class TradingBot:
                     if ev < min_ev:
                         skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": f"unprofitable_ev_{ev:.3f}"})
                         log.info("skip intent: copy unprofitable at our entry (ev=%.3f < %.3f, p=%.2f, entry=%.3f)", ev, min_ev, p, entry); continue
+                    # Minimum absolute expected profit: ev * size_usd must cover the
+                    # operational cost (fees, gas, spread) of placing the order.
+                    min_profit = float(getattr(self.settings, "copy_min_expected_profit_usd", 0.15) or 0.0)
+                    if min_profit > 0:
+                        expected_profit = ev * float(intent.size_usd)
+                        if expected_profit < min_profit:
+                            skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": f"copy_min_profit_{expected_profit:.2f}"})
+                            log.info("skip intent: copy expected profit $%.2f < $%.2f min (ev=%.3f, size=%.2f)", expected_profit, min_profit, ev, intent.size_usd); continue
                 await self._apply_intent_multipliers(intent)
                 disp = self._dispersion_for_intent(intent, cex_map)
                 if not await self._orderbook_gate_passes(intent):
