@@ -400,6 +400,29 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 .setup-msg { font-size: 0.75rem; }
 .setup-msg.ok { color: var(--accent); }
 .setup-msg.err { color: var(--danger); }
+/* Freshness / stale-data indicator */
+#freshnessBadge {
+  font-size: 0.62rem;
+  font-weight: 500;
+  color: var(--muted);
+  margin-top: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+}
+#staleBanner {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: linear-gradient(90deg, rgba(255,92,92,0.18), rgba(255,176,32,0.14));
+  border: 1.5px solid rgba(255,92,92,0.55);
+  border-radius: var(--radius);
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 0.84rem;
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  letter-spacing: 0.01em;
+}
 /* Real vs Paper scoreboard */
 .scoreboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .sb-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
@@ -420,6 +443,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
       <span id="modeTag" class="badge dry">DRY RUN</span>
       <span id="runStatus" class="badge run">...</span>
     </div>
+    <div id="freshnessBadge">Updated &mdash;</div>
   </div>
 
   <div class="nav-section">
@@ -446,6 +470,9 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 
 <!-- Main content area -->
 <div class="main">
+
+  <!-- Stale-data warning banner (shown when poll has been failing >15s) -->
+  <div id="staleBanner">&#9888; Reconnecting &mdash; showing last-known data (<span id="staleAge"></span> old)</div>
 
   <!-- Smart diagnostic banners (injected by JS) -->
   <div id="diagBanners"></div>
@@ -510,7 +537,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
     <div class="cs-card"><div class="cs-label">Unrealized P&amp;L</div><div class="cs-value mono" id="pnl">+$0.00</div><div class="cs-sub">Mark-to-mid</div></div>
     <div class="cs-card"><div class="cs-label">Trades placed</div><div class="cs-value mono" id="trades">0</div><div class="cs-sub" id="lastTrade">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Markets scanned</div><div class="cs-value mono" id="scanned">0</div><div class="cs-sub" id="lastScan">&mdash;</div></div>
-    <div class="cs-card"><div class="cs-label">Open orders</div><div class="cs-value mono" id="openOrders">0</div><div class="cs-sub" id="reconcileMeta">&mdash;</div></div>
+    <div class="cs-card"><div class="cs-label">Resting orders</div><div class="cs-value mono" id="openOrders">0</div><div class="cs-sub">not positions</div><div class="cs-sub" id="reconcileMeta">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Default bet</div><div class="cs-value mono" id="betSize">$5</div><div class="cs-sub" id="betRange">min &ndash; max</div></div>
   </div>
 
@@ -572,7 +599,7 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 
   <!-- Open positions -->
   <div class="section" id="sectionPositions">
-    <h2>Open positions <span id="posSummary" class="badge" style="font-size:0.62rem;font-weight:600;"></span></h2>
+    <h2>Open positions (<span id="posCount">0</span>) <span id="posSummary" class="badge" style="font-size:0.62rem;font-weight:600;"></span></h2>
     <table>
       <thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg</th><th>Mid</th><th>Value</th><th>P&amp;L</th></tr></thead>
       <tbody id="positionsBody"><tr><td colspan="7" class="gray">Loading&hellip;</td></tr></tbody>
@@ -614,10 +641,19 @@ async function fetchState() {
     if (resp.status === 401) { window.location.href = '/login'; return; }
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     updateUI(await resp.json());
+    lastOk = Date.now();
     document.getElementById('status').textContent = 'Last update: ' + new Date().toLocaleTimeString();
+    // Hide stale banner immediately on success
+    const banner = document.getElementById('staleBanner');
+    if (banner) banner.style.display = 'none';
+    const badge = document.getElementById('freshnessBadge');
+    if (badge) badge.textContent = 'Updated just now';
   } catch (e) {
     document.getElementById('runStatus').textContent = 'Disconnected';
     document.getElementById('runStatus').className = 'badge stop';
+    // Fast retry after 2s so recovery doesn't wait the full 5s interval;
+    // the 5s setInterval continues regardless — only schedule from catch to avoid stacking.
+    setTimeout(fetchState, 2000);
   }
 }
 
@@ -924,172 +960,194 @@ function renderCycleDecisions(d) {
 function updateUI(d) {
   const st = d.settings || {};
 
-  // Mode badges
-  const tag = document.getElementById('modeTag');
-  if (d.dry_run) {
-    tag.textContent = 'DRY RUN'; tag.className = 'badge dry';
-  } else {
-    tag.textContent = 'LIVE'; tag.className = 'badge live';
-  }
-  const rs = document.getElementById('runStatus');
-  rs.textContent = d.running ? 'Loop running' : 'Loop stopped';
-  rs.className = 'badge ' + (d.running ? 'run' : 'stop');
+  // --- Section: Mode badges ---
+  try {
+    const tag = document.getElementById('modeTag');
+    if (d.dry_run) {
+      tag.textContent = 'DRY RUN'; tag.className = 'badge dry';
+    } else {
+      tag.textContent = 'LIVE'; tag.className = 'badge live';
+    }
+    const rs = document.getElementById('runStatus');
+    rs.textContent = d.running ? 'Loop running' : 'Loop stopped';
+    rs.className = 'badge ' + (d.running ? 'run' : 'stop');
+  } catch (e) { console.warn('render section failed [mode badges]', e); }
 
-  // Diagnostic banners
-  updateSetupCard(d);
-  renderScoreboard(d);
-  renderDiagBanners(d);
+  // --- Section: Setup card + diagnostic banners + scoreboard ---
+  try { updateSetupCard(d); } catch (e) { console.warn('render section failed [setupCard]', e); }
+  try { renderScoreboard(d); } catch (e) { console.warn('render section failed [scoreboard]', e); }
+  try { renderDiagBanners(d); } catch (e) { console.warn('render section failed [diagBanners]', e); }
 
-  // Equity + Total P&L headline (redemption-proof)
-  const teq = d.total_equity_usd != null ? d.total_equity_usd : 0;
-  document.getElementById('totalEquity').textContent = '$' + teq.toFixed(2);
-  const tpnlEl = document.getElementById('totalPnl');
-  const tpnl = d.total_pnl_usd != null ? d.total_pnl_usd : 0;
-  tpnlEl.textContent = (tpnl >= 0 ? '+$' : '-$') + Math.abs(tpnl).toFixed(2);
-  tpnlEl.className = 'cs-value mono ' + (tpnl >= 0 ? '' : 'red');
+  // --- Section: Equity + balance cards (ALWAYS updates independently) ---
+  try {
+    const teq = d.total_equity_usd != null ? d.total_equity_usd : 0;
+    document.getElementById('totalEquity').textContent = '$' + teq.toFixed(2);
+    const tpnlEl = document.getElementById('totalPnl');
+    const tpnl = d.total_pnl_usd != null ? d.total_pnl_usd : 0;
+    tpnlEl.textContent = (tpnl >= 0 ? '+$' : '-$') + Math.abs(tpnl).toFixed(2);
+    tpnlEl.className = 'cs-value mono ' + (tpnl >= 0 ? '' : 'red');
 
-  // Cycle strip — paper portfolio aware
-  const pp = d.paper_portfolio || {};
-  const isDry = d.dry_run;
-  if (isDry && pp.total_invested > 0) {
-    document.getElementById('balance').textContent = '$' + (pp.paper_balance || 0).toFixed(2);
-    document.getElementById('portfolio').textContent = '$' + (pp.portfolio_value || 0).toFixed(2);
-    const pnlEl = document.getElementById('pnl');
-    const pnl = pp.unrealized_pnl || 0;
-    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
-    pnlEl.className = 'cs-value mono ' + (pnl >= 0 ? '' : 'red');
-  } else {
-    document.getElementById('balance').textContent = '$' + (d.usdc_balance || 0).toFixed(2);
-    document.getElementById('portfolio').textContent = '$' + (d.portfolio_value || 0).toFixed(2);
-    const pnlEl = document.getElementById('pnl');
-    const pnl = d.total_pnl || 0;
-    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
-    pnlEl.className = 'cs-value mono ' + (pnl >= 0 ? '' : 'red');
-  }
+    const pp = d.paper_portfolio || {};
+    const isDry = d.dry_run;
+    if (isDry && pp.total_invested > 0) {
+      document.getElementById('balance').textContent = '$' + (pp.paper_balance || 0).toFixed(2);
+      document.getElementById('portfolio').textContent = '$' + (pp.portfolio_value || 0).toFixed(2);
+      const pnlEl = document.getElementById('pnl');
+      const pnl = pp.unrealized_pnl || 0;
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+      pnlEl.className = 'cs-value mono ' + (pnl >= 0 ? '' : 'red');
+    } else {
+      document.getElementById('balance').textContent = '$' + (d.usdc_balance || 0).toFixed(2);
+      document.getElementById('portfolio').textContent = '$' + (d.portfolio_value || 0).toFixed(2);
+      const pnlEl = document.getElementById('pnl');
+      const pnl = d.total_pnl || 0;
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+      pnlEl.className = 'cs-value mono ' + (pnl >= 0 ? '' : 'red');
+    }
+  } catch (e) { console.warn('render section failed [equity/balance cards]', e); }
 
-  document.getElementById('trades').textContent = d.trades_placed || 0;
-  const tradesFilledEl = document.getElementById('lastTrade');
-  if (isDry && pp.positions_count > 0) {
-    tradesFilledEl.textContent = pp.winners + 'W / ' + pp.losers + 'L (' + pp.win_rate + '%)';
-  } else {
-    tradesFilledEl.textContent = d.last_trade ? timeAgo(d.last_trade) : '\u2014';
-  }
-  document.getElementById('scanned').textContent = d.markets_scanned || 0;
-  document.getElementById('lastScan').textContent = d.last_scan ? timeAgo(d.last_scan) : '\u2014';
-  document.getElementById('betSize').textContent = '$' + (d.default_bet || 5).toFixed(0);
-  document.getElementById('betRange').textContent = '$' + (d.min_bet||1) + ' \u2013 $' + (d.max_bet||25);
-  document.getElementById('openOrders').textContent = d.open_orders_count != null ? d.open_orders_count : (d.open_orders || []).length;
-  const ru = d.reconcile_updates_last;
-  document.getElementById('reconcileMeta').textContent = d.last_reconcile_at
-    ? ('Last: ' + timeAgo(d.last_reconcile_at) + (ru != null ? ' \u00b7 +' + ru + ' rows' : ''))
-    : '\u2014';
+  // --- Section: Cycle strip counters ---
+  try {
+    const pp = d.paper_portfolio || {};
+    const isDry = d.dry_run;
+    document.getElementById('trades').textContent = d.trades_placed || 0;
+    const tradesFilledEl = document.getElementById('lastTrade');
+    if (isDry && pp.positions_count > 0) {
+      tradesFilledEl.textContent = pp.winners + 'W / ' + pp.losers + 'L (' + pp.win_rate + '%)';
+    } else {
+      tradesFilledEl.textContent = d.last_trade ? timeAgo(d.last_trade) : '—';
+    }
+    document.getElementById('scanned').textContent = d.markets_scanned || 0;
+    document.getElementById('lastScan').textContent = d.last_scan ? timeAgo(d.last_scan) : '—';
+    document.getElementById('betSize').textContent = '$' + (d.default_bet || 5).toFixed(0);
+    document.getElementById('betRange').textContent = '$' + (d.min_bet||1) + ' – $' + (d.max_bet||25);
+    document.getElementById('openOrders').textContent = d.open_orders_count != null ? d.open_orders_count : (d.open_orders || []).length;
+    const ru = d.reconcile_updates_last;
+    document.getElementById('reconcileMeta').textContent = d.last_reconcile_at
+      ? ('Last: ' + timeAgo(d.last_reconcile_at) + (ru != null ? ' · +' + ru + ' rows' : ''))
+      : '—';
+  } catch (e) { console.warn('render section failed [cycle strip counters]', e); }
 
-  // Agents + categories
-  renderAgents(d.agents_detail);
-  renderCats(st.categories);
+  // --- Section: Agents + categories ---
+  try {
+    renderAgents(d.agents_detail);
+    renderCats(st.categories);
+  } catch (e) { console.warn('render section failed [agents/categories]', e); }
 
-  // Intents + decisions
-  renderCycleDecisions(d);
+  // --- Section: Intents + decisions ---
+  try { renderCycleDecisions(d); } catch (e) { console.warn('render section failed [cycle decisions]', e); }
 
-  // Cycle diagnostics
-  const rawInfo = document.getElementById('agentsInfo');
-  const cat = st.categories || {};
-  const off = Object.keys(cat).filter(k => !cat[k]);
-  const infoLines = [];
-  infoLines.push('CEX gate: ' + (st.cex_gate_crypto ? 'ON' : 'OFF') + ', max dispersion: ' + (st.max_cex_dispersion_bps || 0) + 'bps');
-  infoLines.push('Reconcile: ' + (st.reconcile_enabled ? 'ON' : 'OFF'));
-  if (off.length) infoLines.push('Disabled categories: ' + off.map(c => c.replace('ENABLE_','').toLowerCase()).join(', '));
-  if ((d.agents_fired || []).length) infoLines.push('Agents fired: ' + d.agents_fired.join(', '));
-  const si = (d.last_intents || []).slice(0, 8);
-  if (si.length) {
-    infoLines.push('');
-    infoLines.push('Sample intents (' + si.length + '):');
-    si.forEach(it => {
-      infoLines.push('  ' + (it.agent||'?') + ': ' + (it.question||it.strategy||'').substring(0,60) + ' | $' + (it.usd||0).toFixed(2) + ' @ ' + (it.max_price||0).toFixed(4));
-    });
-  }
-  rawInfo.textContent = infoLines.join('\n');
+  // --- Section: Cycle diagnostics ---
+  try {
+    const rawInfo = document.getElementById('agentsInfo');
+    const cat = st.categories || {};
+    const off = Object.keys(cat).filter(k => !cat[k]);
+    const infoLines = [];
+    infoLines.push('CEX gate: ' + (st.cex_gate_crypto ? 'ON' : 'OFF') + ', max dispersion: ' + (st.max_cex_dispersion_bps || 0) + 'bps');
+    infoLines.push('Reconcile: ' + (st.reconcile_enabled ? 'ON' : 'OFF'));
+    if (off.length) infoLines.push('Disabled categories: ' + off.map(c => c.replace('ENABLE_','').toLowerCase()).join(', '));
+    if ((d.agents_fired || []).length) infoLines.push('Agents fired: ' + d.agents_fired.join(', '));
+    const si = (d.last_intents || []).slice(0, 8);
+    if (si.length) {
+      infoLines.push('');
+      infoLines.push('Sample intents (' + si.length + '):');
+      si.forEach(it => {
+        infoLines.push('  ' + (it.agent||'?') + ': ' + (it.question||it.strategy||'').substring(0,60) + ' | $' + (it.usd||0).toFixed(2) + ' @ ' + (it.max_price||0).toFixed(4));
+      });
+    }
+    rawInfo.textContent = infoLines.join('\n');
+  } catch (e) { console.warn('render section failed [cycle diagnostics]', e); }
 
-  // CEX panel
-  renderCex(d.cex_snapshot);
+  // --- Section: CEX panel ---
+  try { renderCex(d.cex_snapshot); } catch (e) { console.warn('render section failed [cex]', e); }
 
-  // Errors
-  const errs = d.errors || [];
-  const errBox = document.getElementById('errorsBox');
-  if (errs.length) {
-    errBox.style.display = 'block';
-    document.getElementById('errorsList').innerHTML = errs.map(e => '<li>' + escHtml(e) + '</li>').join('');
-  } else errBox.style.display = 'none';
+  // --- Section: Errors ---
+  try {
+    const errs = d.errors || [];
+    const errBox = document.getElementById('errorsBox');
+    if (errs.length) {
+      errBox.style.display = 'block';
+      document.getElementById('errorsList').innerHTML = errs.map(e => '<li>' + escHtml(e) + '</li>').join('');
+    } else errBox.style.display = 'none';
+  } catch (e) { console.warn('render section failed [errors]', e); }
 
-  // Open orders table
-  const ob = document.getElementById('openOrdersBody');
-  const oo = d.open_orders || [];
-  if (!oo.length) ob.innerHTML = '<tr><td colspan="6" class="gray">No working orders</td></tr>';
-  else ob.innerHTML = oo.map(o => '<tr>' +
-    '<td class="mono gray">' + escHtml((o.order_id||'').substring(0,18)) + '\u2026</td>' +
-    '<td class="mono gray">' + escHtml((o.token_id||'').substring(0,14)) + '\u2026</td>' +
-    '<td>' + escHtml(o.side||'\u2014') + '</td>' +
-    '<td class="mono">' + (o.price != null ? Number(o.price).toFixed(4) : '\u2014') + '</td>' +
-    '<td class="mono">' + (o.size_matched != null ? Number(o.size_matched).toFixed(2) : '\u2014') + ' / ' + (o.original_size != null ? Number(o.original_size).toFixed(2) : '\u2014') + '</td>' +
-    '<td>' + escHtml(o.status||'\u2014') + '</td>' +
-  '</tr>').join('');
+  // --- Section: Open orders table ---
+  try {
+    const ob = document.getElementById('openOrdersBody');
+    const oo = d.open_orders || [];
+    if (!oo.length) ob.innerHTML = '<tr><td colspan="6" class="gray">No working orders</td></tr>';
+    else ob.innerHTML = oo.map(o => '<tr>' +
+      '<td class="mono gray">' + escHtml((o.order_id||'').substring(0,18)) + '…</td>' +
+      '<td class="mono gray">' + escHtml((o.token_id||'').substring(0,14)) + '…</td>' +
+      '<td>' + escHtml(o.side||'—') + '</td>' +
+      '<td class="mono">' + (o.price != null ? Number(o.price).toFixed(4) : '—') + '</td>' +
+      '<td class="mono">' + (o.size_matched != null ? Number(o.size_matched).toFixed(2) : '—') + ' / ' + (o.original_size != null ? Number(o.original_size).toFixed(2) : '—') + '</td>' +
+      '<td>' + escHtml(o.status||'—') + '</td>' +
+    '</tr>').join('');
+  } catch (e) { console.warn('render section failed [open orders table]', e); }
 
-  // Position win/lost/active summary badge
-  const ps = d.position_summary || {};
-  const rp = ps.realized_pnl || 0;
-  const el = document.getElementById('posSummary');
-  if (el) el.textContent = (ps.active||0) + ' active · ' + (ps.won||0) + ' won · ' + (ps.lost||0) + ' lost · resolved (held) ' + (rp>=0?'+$':'-$') + Math.abs(rp).toFixed(2);
+  // --- Section: Positions table (ALWAYS updates independently) ---
+  try {
+    const ps = d.position_summary || {};
+    const rp = ps.realized_pnl || 0;
+    const summaryEl = document.getElementById('posSummary');
+    if (summaryEl) summaryEl.textContent = (ps.active||0) + ' active · ' + (ps.won||0) + ' won · ' + (ps.lost||0) + ' lost · resolved (held) ' + (rp>=0?'+$':'-$') + Math.abs(rp).toFixed(2);
 
-  // Positions table
-  const pb = document.getElementById('positionsBody');
-  const pos = d.positions || [];
-  if (!pos.length) pb.innerHTML = '<tr><td colspan="7" class="gray">No open positions</td></tr>';
-  else pb.innerHTML = pos.map(p => {
-    const isPaper = p.paper;
-    const pnlPct = p.pnl_pct || 0;
-    const pnlColor = (p.pnl||0) >= 0 ? 'green' : 'red';
-    return '<tr' + (isPaper ? ' style="opacity:0.9;"' : '') + '>' +
-    '<td>' + escHtml((p.market||'').substring(0,48)) + (isPaper ? ' <span style="font-size:0.6rem;color:var(--warn);font-weight:600;">PAPER</span>' : '') + '</td>' +
-    '<td>' + escHtml(p.outcome||'\u2014') + '</td>' +
-    '<td class="mono">' + (p.size||0).toFixed(2) + '</td>' +
-    '<td class="mono">$' + (p.avg_price||0).toFixed(4) + '</td>' +
-    '<td class="mono">$' + (p.current_price||0).toFixed(4) + '</td>' +
-    '<td class="mono">$' + (p.value||0).toFixed(2) + '</td>' +
-    '<td class="mono ' + pnlColor + '">' + ((p.pnl||0)>=0?'+':'') + '$' + (p.pnl||0).toFixed(2) + ' <span style="font-size:0.65rem;">(' + ((pnlPct>=0)?'+':'') + pnlPct.toFixed(1) + '%)</span></td>' +
-    '</tr>';
-  }).join('');
+    const pos = d.positions || [];
+    // Update the live count in the section header
+    const posCountEl = document.getElementById('posCount');
+    if (posCountEl) posCountEl.textContent = pos.length;
 
-  // Trade history table
-  const tb = document.getElementById('tradesBody');
-  const trades = d.trade_history || [];
-  if (!trades.length) tb.innerHTML = '<tr><td colspan="10" class="gray">No trades yet</td></tr>';
-  else tb.innerHTML = trades.slice().reverse().map(t => {
-    const tst = (t.status||'').toLowerCase().replace(/\s+/g, '_');
-    const isDry = tst.startsWith('dry_run') || tst === 'dry_run';
-    const sc = tst.startsWith('dry_run') ? (tst.includes('miss') ? 'dry_run_miss' : 'dry_run_filled')
-      : tst === 'filled' ? 'filled'
-      : tst === 'submitted' ? 'submitted'
-      : tst === 'failed' ? 'failed'
-      : tst === 'cancelled' ? 'cancelled'
-      : '';
-    const lbl = isDry
-      ? (tst.includes('miss') ? 'Sim Miss' : tst.includes('filled') ? 'Sim Filled' : 'Simulated')
-      : escHtml(t.status||'\u2014');
-    return '<tr' + (isDry ? ' style="opacity:0.85;"' : '') + '>' +
-      '<td class="gray">' + timeAgo(t.timestamp) + '</td>' +
-      '<td>' + escHtml((t.market||'').substring(0,36)) + '</td>' +
-      '<td class="' + (t.side==='BUY'?'green':'red') + '">' + t.side + '</td>' +
-      '<td>' + escHtml(t.outcome||'\u2014') + '</td>' +
-      '<td class="mono">$' + (t.price||0).toFixed(4) + '</td>' +
-      '<td class="mono">' + (t.size||0).toFixed(2) + '</td>' +
-      '<td class="mono">$' + (t.cost||0).toFixed(2) + '</td>' +
-      '<td class="yellow">' + escHtml(t.strategy||'\u2014') + '</td>' +
-      '<td><span class="trade-status ' + sc + '">' + lbl + '</span></td>' +
-      '<td class="gray mono" style="font-size:0.7rem;">' + escHtml(t.reconcile_note||'\u2014') + '</td>' +
-    '</tr>';
-  }).join('');
+    const pb = document.getElementById('positionsBody');
+    if (!pos.length) pb.innerHTML = '<tr><td colspan="7" class="gray">No open positions</td></tr>';
+    else pb.innerHTML = pos.map(p => {
+      const isPaper = p.paper;
+      const pnlPct = p.pnl_pct || 0;
+      const pnlColor = (p.pnl||0) >= 0 ? 'green' : 'red';
+      return '<tr' + (isPaper ? ' style="opacity:0.9;"' : '') + '>' +
+      '<td>' + escHtml((p.market||'').substring(0,48)) + (isPaper ? ' <span style="font-size:0.6rem;color:var(--warn);font-weight:600;">PAPER</span>' : '') + '</td>' +
+      '<td>' + escHtml(p.outcome||'—') + '</td>' +
+      '<td class="mono">' + (p.size||0).toFixed(2) + '</td>' +
+      '<td class="mono">$' + (p.avg_price||0).toFixed(4) + '</td>' +
+      '<td class="mono">$' + (p.current_price||0).toFixed(4) + '</td>' +
+      '<td class="mono">$' + (p.value||0).toFixed(2) + '</td>' +
+      '<td class="mono ' + pnlColor + '">' + ((p.pnl||0)>=0?'+':'') + '$' + (p.pnl||0).toFixed(2) + ' <span style="font-size:0.65rem;">(' + ((pnlPct>=0)?'+':'') + pnlPct.toFixed(1) + '%)</span></td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) { console.warn('render section failed [positions table]', e); }
+
+  // --- Section: Trade history table ---
+  try {
+    const tb = document.getElementById('tradesBody');
+    const trades = d.trade_history || [];
+    if (!trades.length) tb.innerHTML = '<tr><td colspan="10" class="gray">No trades yet</td></tr>';
+    else tb.innerHTML = trades.slice().reverse().map(t => {
+      const tst = (t.status||'').toLowerCase().replace(/\s+/g, '_');
+      const isDryTrade = tst.startsWith('dry_run') || tst === 'dry_run';
+      const sc = tst.startsWith('dry_run') ? (tst.includes('miss') ? 'dry_run_miss' : 'dry_run_filled')
+        : tst === 'filled' ? 'filled'
+        : tst === 'submitted' ? 'submitted'
+        : tst === 'failed' ? 'failed'
+        : tst === 'cancelled' ? 'cancelled'
+        : '';
+      const lbl = isDryTrade
+        ? (tst.includes('miss') ? 'Sim Miss' : tst.includes('filled') ? 'Sim Filled' : 'Simulated')
+        : escHtml(t.status||'—');
+      return '<tr' + (isDryTrade ? ' style="opacity:0.85;"' : '') + '>' +
+        '<td class="gray">' + timeAgo(t.timestamp) + '</td>' +
+        '<td>' + escHtml((t.market||'').substring(0,36)) + '</td>' +
+        '<td class="' + (t.side==='BUY'?'green':'red') + '">' + t.side + '</td>' +
+        '<td>' + escHtml(t.outcome||'—') + '</td>' +
+        '<td class="mono">$' + (t.price||0).toFixed(4) + '</td>' +
+        '<td class="mono">' + (t.size||0).toFixed(2) + '</td>' +
+        '<td class="mono">$' + (t.cost||0).toFixed(2) + '</td>' +
+        '<td class="yellow">' + escHtml(t.strategy||'—') + '</td>' +
+        '<td><span class="trade-status ' + sc + '">' + lbl + '</span></td>' +
+        '<td class="gray mono" style="font-size:0.7rem;">' + escHtml(t.reconcile_note||'—') + '</td>' +
+      '</tr>';
+    }).join('');
+  } catch (e) { console.warn('render section failed [trade history]', e); }
 }
-
 function timeAgo(iso) {
   if (!iso) return '\u2014';
   const t = new Date(iso).getTime();
@@ -1152,6 +1210,34 @@ async function copyAllErrors() {
     }
   }
 }
+
+// --- Freshness tracking ---
+let lastOk = 0;
+
+// Update the freshness badge and stale banner every second
+setInterval(function() {
+  if (!lastOk) return;
+  const ageMs = Date.now() - lastOk;
+  const ageSec = Math.floor(ageMs / 1000);
+  let ageStr;
+  if (ageSec < 60) ageStr = ageSec + 's ago';
+  else if (ageSec < 3600) ageStr = Math.floor(ageSec / 60) + 'm ago';
+  else ageStr = Math.floor(ageSec / 3600) + 'h ago';
+
+  const badge = document.getElementById('freshnessBadge');
+  if (badge) badge.textContent = 'Updated ' + ageStr;
+
+  const banner = document.getElementById('staleBanner');
+  const ageEl = document.getElementById('staleAge');
+  if (banner && ageEl) {
+    if (ageMs > 15000) {
+      ageEl.textContent = ageStr;
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+}, 1000);
 
 fetchState();
 setInterval(fetchState, 5000);
