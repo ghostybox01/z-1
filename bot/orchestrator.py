@@ -1255,4 +1255,10 @@ class TradingBot:
             "paper_portfolio": self._paper_portfolio.get_summary(),
             "has_private_key": bool(self.settings.polymarket_private_key),
             "position_summary": self.state.position_summary,
+            "total_equity_usd": round(float(self.state.usdc_balance or 0) + float(self.state.portfolio_value or 0), 2),
+            "total_pnl_usd": round(
+                float(self.state.usdc_balance or 0) + float(self.state.portfolio_value or 0)
+                - float(getattr(self.settings, "starting_bankroll_usd", 24.0) or 0.0),
+                2,
+            ),
         }

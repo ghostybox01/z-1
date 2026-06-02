@@ -503,6 +503,8 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 
   <!-- Cycle strip -->
   <div class="cycle-strip">
+    <div class="cs-card"><div class="cs-label">Equity</div><div class="cs-value mono" id="totalEquity">$0.00</div><div class="cs-sub">Cash + positions</div></div>
+    <div class="cs-card"><div class="cs-label">P&amp;L</div><div class="cs-value mono" id="totalPnl">+$0.00</div><div class="cs-sub">vs starting bankroll</div></div>
     <div class="cs-card"><div class="cs-label">USDC balance</div><div class="cs-value mono" id="balance">$0.00</div><div class="cs-sub">Available</div></div>
     <div class="cs-card"><div class="cs-label">Portfolio</div><div class="cs-value mono" id="portfolio">$0.00</div><div class="cs-sub">Open positions</div></div>
     <div class="cs-card"><div class="cs-label">Unrealized P&amp;L</div><div class="cs-value mono" id="pnl">+$0.00</div><div class="cs-sub">Mark-to-mid</div></div>
@@ -938,6 +940,14 @@ function updateUI(d) {
   renderScoreboard(d);
   renderDiagBanners(d);
 
+  // Equity + Total P&L headline (redemption-proof)
+  const teq = d.total_equity_usd != null ? d.total_equity_usd : 0;
+  document.getElementById('totalEquity').textContent = '$' + teq.toFixed(2);
+  const tpnlEl = document.getElementById('totalPnl');
+  const tpnl = d.total_pnl_usd != null ? d.total_pnl_usd : 0;
+  tpnlEl.textContent = (tpnl >= 0 ? '+$' : '-$') + Math.abs(tpnl).toFixed(2);
+  tpnlEl.className = 'cs-value mono ' + (tpnl >= 0 ? '' : 'red');
+
   // Cycle strip — paper portfolio aware
   const pp = d.paper_portfolio || {};
   const isDry = d.dry_run;
@@ -1028,7 +1038,7 @@ function updateUI(d) {
   const ps = d.position_summary || {};
   const rp = ps.realized_pnl || 0;
   const el = document.getElementById('posSummary');
-  if (el) el.textContent = (ps.active||0) + ' active · ' + (ps.won||0) + ' won · ' + (ps.lost||0) + ' lost · realized ' + (rp>=0?'+$':'-$') + Math.abs(rp).toFixed(2);
+  if (el) el.textContent = (ps.active||0) + ' active · ' + (ps.won||0) + ' won · ' + (ps.lost||0) + ' lost · resolved (held) ' + (rp>=0?'+$':'-$') + Math.abs(rp).toFixed(2);
 
   // Positions table
   const pb = document.getElementById('positionsBody');

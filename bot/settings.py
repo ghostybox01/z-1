@@ -172,6 +172,7 @@ def default_kv_seed() -> dict[str, str]:
         "telegram_on_balance_change": "false",
         "telegram_daily_report": "false",
         "telegram_daily_report_hour": "9",
+        "starting_bankroll_usd": "24",
     }
     for ck in cats:
         out[ck] = "true"
@@ -306,6 +307,9 @@ class Settings:
     # Phase 2: paper execution realism
     paper_realism_enabled: bool = True
     paper_slippage_model_bps: float = 50.0
+
+    # Starting bankroll for equity / P&L calculation
+    starting_bankroll_usd: float = 24.0
 
     # Telegram notifications
     telegram_bot_token: str = ""
@@ -522,6 +526,7 @@ class Settings:
             telegram_on_balance_change=_b(g("telegram_on_balance_change", "false"), False),
             telegram_daily_report=_b(g("telegram_daily_report", "false"), False),
             telegram_daily_report_hour=_i(g("telegram_daily_report_hour", "9"), 9),
+            starting_bankroll_usd=_f(g("starting_bankroll_usd", "24"), 24.0),
         )
 
     @classmethod
@@ -624,4 +629,5 @@ class Settings:
             "follower_latency_ms": self.follower_latency_ms,
             "paper_realism_enabled": self.paper_realism_enabled,
             "paper_slippage_model_bps": self.paper_slippage_model_bps,
+            "starting_bankroll_usd": self.starting_bankroll_usd,
         }
