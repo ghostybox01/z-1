@@ -72,7 +72,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import statistics
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -98,6 +100,11 @@ DISCOVER_CATEGORIES: list[str] = ["SPORTS", "POLITICS", "FINANCE"]
 
 # A resolved binary outcome must be within this tolerance of 0 or 1.
 _RESOLVE_TOL = 0.02
+
+# A wallet's "proven niche" = any category in which it has at least this many
+# PASSED BUY signals.  Fallback: if no category clears the bar, the wallet's
+# single top category is treated as its niche (so it isn't entirely "out").
+NICHE_MIN_PASSED = 15
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +179,24 @@ def score_copy(entry_price: float, resolved_price: float) -> tuple[float, float,
         return 0.0, 0.0, resolved_price >= 0.5
     pnl = (resolved_price - entry_price) / entry_price
     return pnl, pnl * 10_000.0, (resolved_price >= 0.5)
+
+
+def proven_niches(cat_counts: "Counter[str]", *, min_passed: int = NICHE_MIN_PASSED) -> set[str]:
+    """Return a wallet's proven-niche categories from its passed-BUY counts.
+
+    A category is a proven niche when the wallet has ``>= min_passed`` passed BUY
+    signals in it.  Fallback: if no category clears the bar but the wallet traded
+    at all, its single most-traded category is returned (so the wallet isn't
+    classified entirely out-of-niche).  Empty counts → empty set.
+    """
+    if not cat_counts:
+        return set()
+    niches = {cat for cat, n in cat_counts.items() if n >= min_passed}
+    if niches:
+        return niches
+    # Fallback: single top category (deterministic tie-break by name).
+    top_cat = max(cat_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return {top_cat}
 
 
 def parse_gamma_resolution(market: dict[str, Any], token_id: str) -> Optional[float]:
@@ -441,7 +466,10 @@ async def run_copy_probe(
         buys_by_wallet = await asyncio.gather(*[_get_buys(w) for w in wallets])
 
         wr_map: dict[str, WalletResult] = {w: WalletResult(wallet=w) for w in wallets}
-        copies: list[tuple[str, str, str, float]] = []  # wallet, token_id, condition_id, entry_px
+        # wallet, token_id, condition_id, entry_px, category
+        copies: list[tuple[str, str, str, float, str]] = []
+        # Per-wallet count of PASSED BUY signals by category (for niche profiling).
+        cat_counts_by_wallet: dict[str, Counter[str]] = {w: Counter() for w in wallets}
         unique_cids: set[str] = set()
         for wallet, buys in buys_by_wallet:
             wr = wr_map[wallet]
@@ -457,13 +485,23 @@ async def run_copy_probe(
                     wr.n_skipped_filter += 1
                     continue
                 wr.n_passed += 1
+                cat_counts_by_wallet[wallet][c.category] += 1
                 entry_px = limit_price_with_buffer(settings, c.price)
                 condition_id = str(entry.get("conditionId") or entry.get("condition_id") or "")
                 if not condition_id:
                     wr.n_skipped_error += 1
                     continue
-                copies.append((wallet, c.token_id, condition_id, entry_px))
+                copies.append((wallet, c.token_id, condition_id, entry_px, c.category))
                 unique_cids.add(condition_id)
+
+        # --- After Pass 1: each wallet's proven niches (specialties).
+        niches_by_wallet: dict[str, set[str]] = {
+            w: proven_niches(cat_counts_by_wallet[w]) for w in wallets
+        }
+        for w in wallets:
+            nis = niches_by_wallet[w]
+            if nis:
+                log.info("%s niches: %s", w[:12], ", ".join(sorted(nis)))
 
         # --- Pass 2: resolve every UNIQUE market once, concurrently (the slow I/O).
         cid_list = list(unique_cids)
@@ -489,8 +527,15 @@ async def run_copy_probe(
             log.info("  resolved %d/%d markets", min(i + CHUNK, len(cid_list)), len(cid_list))
 
         # --- Pass 3: score every copy from the cache (no I/O).
-        sample_rows: list[tuple[str, float, float, float, int]] = []
-        for wallet, token_id, condition_id, entry_px in copies:
+        # wallet, entry, resolved, pnl, win, category, in_niche
+        sample_rows: list[tuple[str, float, float, float, int, str, int]] = []
+        # Per-copy bps records split by in-/out-of-niche and by category, so we
+        # can report median (mean is dominated by rare longshot jackpots).
+        niche_bps: dict[bool, list[float]] = {True: [], False: []}
+        niche_wins: dict[bool, int] = {True: 0, False: 0}
+        cat_bps: dict[str, list[float]] = {}
+        cat_wins: dict[str, int] = {}
+        for wallet, token_id, condition_id, entry_px, category in copies:
             wr = wr_map[wallet]
             try:
                 status, resolved = _interpret_market(cache.get(condition_id), token_id)
@@ -508,15 +553,22 @@ async def run_copy_probe(
             wr.wins += int(win)
             wr.total_pnl_per_dollar += pnl
             wr.sum_bps += bps
-            sample_rows.append((wallet, entry_px, resolved, pnl, int(win)))
+            in_niche = category in niches_by_wallet.get(wallet, set())
+            niche_bps[in_niche].append(bps)
+            niche_wins[in_niche] += int(win)
+            cat_bps.setdefault(category, []).append(bps)
+            cat_wins[category] = cat_wins.get(category, 0) + int(win)
+            sample_rows.append(
+                (wallet, entry_px, resolved, pnl, int(win), category, int(in_niche))
+            )
 
         # Dump per-copy samples so we can report MEDIAN + by-price-bucket stats
         # (the mean is dominated by rare longshot jackpots and is misleading).
         try:
             with open("/tmp/copy_probe_samples.csv", "w") as f:
-                f.write("wallet,entry,resolved,pnl_per_dollar,win\n")
+                f.write("wallet,entry,resolved,pnl_per_dollar,win,category,in_niche\n")
                 for row in sample_rows:
-                    f.write("%s,%.4f,%.1f,%.4f,%d\n" % row)
+                    f.write("%s,%.4f,%.1f,%.4f,%d,%s,%d\n" % row)
             log.info("wrote %d copy samples to /tmp/copy_probe_samples.csv", len(sample_rows))
         except Exception as exc:
             log.warning("sample csv write failed: %s", exc)
@@ -535,7 +587,69 @@ async def run_copy_probe(
             agg.sum_bps += wr.sum_bps
 
     _print_verdict(agg, buffer_bps)
+    _print_niche_split(niche_bps, niche_wins, cat_bps, cat_wins)
     return agg
+
+
+def _split_stats(bps: list[float], wins: int) -> tuple[int, float, float, float]:
+    """(n, win_rate, mean_bps, median_bps) for a list of per-copy bps + win count."""
+    n = len(bps)
+    if n == 0:
+        return 0, 0.0, 0.0, 0.0
+    return n, wins / n, sum(bps) / n, statistics.median(bps)
+
+
+def _print_niche_split(
+    niche_bps: dict[bool, list[float]],
+    niche_wins: dict[bool, int],
+    cat_bps: dict[str, list[float]],
+    cat_wins: dict[str, int],
+    *,
+    top_categories: int = 6,
+) -> None:
+    """Print the in-niche vs out-of-niche win-rate / median-bps split + a
+    per-category table.  Win-rate and MEDIAN lead; mean is shown but trails
+    because longshot jackpots skew it."""
+    in_bps = niche_bps.get(True, [])
+    out_bps = niche_bps.get(False, [])
+    total_n = len(in_bps) + len(out_bps)
+
+    print(f"\n{'='*72}")
+    print("Per-niche split  —  does copying a wallet ONLY in its proven niche win more?")
+    print(f"{'='*72}")
+    if total_n == 0:
+        print("  NO RESOLVED COPIES — cannot split by niche.")
+        print(f"{'='*72}\n")
+        return
+
+    n_in, wr_in, mean_in, med_in = _split_stats(in_bps, niche_wins.get(True, 0))
+    n_out, wr_out, mean_out, med_out = _split_stats(out_bps, niche_wins.get(False, 0))
+    pct_out = len(out_bps) / total_n
+
+    print(f"  {'bucket':<14} {'n':>6} {'win_rate':>9} {'median_bps':>11} {'mean_bps':>10}")
+    print(f"  {'-'*14} {'-'*6} {'-'*9} {'-'*11} {'-'*10}")
+    print(f"  {'IN-NICHE':<14} {n_in:>6} {wr_in:>8.1%} {med_in:>+11.1f} {mean_in:>+10.1f}")
+    print(f"  {'OUT-OF-NICHE':<14} {n_out:>6} {wr_out:>8.1%} {med_out:>+11.1f} {mean_out:>+10.1f}")
+    print(f"  {'-'*60}")
+    print(
+        f"  OUT-of-niche share of resolved copies: {pct_out:.1%} "
+        f"({len(out_bps)}/{total_n})  <- volume lost if we route strictly"
+    )
+    if n_in and n_out:
+        print(
+            f"  Win-rate delta (in - out): {wr_in - wr_out:+.1%}   "
+            f"median-bps delta: {med_in - med_out:+.1f}"
+        )
+    print(f"  {'-'*60}")
+
+    # Per-category table: top categories by resolved-copy volume.
+    cats = sorted(cat_bps.items(), key=lambda kv: len(kv[1]), reverse=True)[:top_categories]
+    print(f"  {'category':<14} {'n':>6} {'win_rate':>9} {'median_bps':>11}")
+    print(f"  {'-'*14} {'-'*6} {'-'*9} {'-'*11}")
+    for cat, bps in cats:
+        n, wr_c, _mean_c, med_c = _split_stats(bps, cat_wins.get(cat, 0))
+        print(f"  {cat[:12]+'  ':<14} {n:>6} {wr_c:>8.1%} {med_c:>+11.1f}")
+    print(f"{'='*72}\n")
 
 
 def _print_verdict(agg: ProbeAggregate, buffer_bps: float) -> None:
