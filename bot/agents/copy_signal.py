@@ -149,6 +149,7 @@ class CopySignalAgent:
                         strategy="copy_trade",
                         reason=f"wallet={wallet[:10]}… px~{c.price:.3f}",
                         reference_price=c.price,
+                        source_wallet=wallet,
                     )
                 )
 

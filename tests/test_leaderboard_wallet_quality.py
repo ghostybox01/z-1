@@ -258,6 +258,39 @@ class AnalyzeWalletQuality(unittest.TestCase):
         self.assertEqual(q["max_streak"], 3)
         self.assertEqual(q["current_streak"], 0)
 
+    def test_current_loss_streak_counts_trailing_losses(self):
+        """Most recent three outcomes are losses → current_loss_streak == 3.
+
+        Round-trips: WIN(ts2), then three LOSSES (ts4, ts6, ts8). Walking back
+        from the latest outcome we count 3 leading losses before hitting the win.
+        """
+        trades = [
+            _t(1.0, "A", "BUY", 0.30, 100),
+            _t(2.0, "A", "SELL", 0.70, 100),   # WIN  (oldest)
+            _t(3.0, "B", "BUY", 0.60, 100),
+            _t(4.0, "B", "SELL", 0.40, 100),   # LOSS
+            _t(5.0, "C", "BUY", 0.60, 100),
+            _t(6.0, "C", "SELL", 0.40, 100),   # LOSS
+            _t(7.0, "D", "BUY", 0.60, 100),
+            _t(8.0, "D", "SELL", 0.40, 100),   # LOSS (most recent)
+        ]
+        q = self._run(trades, [])
+        self.assertEqual(q["current_loss_streak"], 3)
+
+    def test_current_loss_streak_zero_when_latest_is_win(self):
+        trades = [
+            _t(1.0, "A", "BUY", 0.60, 100),
+            _t(2.0, "A", "SELL", 0.40, 100),   # LOSS (older)
+            _t(3.0, "B", "BUY", 0.30, 100),
+            _t(4.0, "B", "SELL", 0.70, 100),   # WIN (most recent)
+        ]
+        q = self._run(trades, [])
+        self.assertEqual(q["current_loss_streak"], 0)
+
+    def test_current_loss_streak_zero_when_no_outcomes(self):
+        q = self._run([_t(1.0, "A", "BUY", 0.5, 100)], [])
+        self.assertEqual(q["current_loss_streak"], 0)
+
     def test_open_position_count(self):
         trades = [
             _t(1.0, "A", "BUY", 0.30, 100),
@@ -382,6 +415,47 @@ class DiscoverQualifiedWallets(unittest.TestCase):
         positions = [{"redeemable": True, "curPrice": 0.0, "cashPnl": -60.0} for _ in range(3)]
         qualified = self._run(lb, {w: trades}, {w: []}, {w: positions})
         self.assertEqual(qualified, [])
+
+    def test_loss_streak_rejects_otherwise_qualified_wallet(self):
+        """A wallet with a strong overall record (8W/3L = ~73%, max_streak 8)
+        but whose three MOST RECENT outcomes are losses must be rejected when
+        max_loss_streak=3, even though it clears win-rate, sample, and streak
+        gates. Same fixture WITHOUT the cutoff (max_loss_streak=0) qualifies."""
+        w = "0x" + "9" * 40
+        lb = [{"proxyWallet": w, "rank": 1, "pnl": 1e3, "vol": 1e4, "userName": "streaky"}]
+        trades = []
+        ts = 0.0
+        for i in range(8):  # 8 winning round-trips first (builds max_streak=8)
+            trades.append(_t(ts, f"win_{i}", "BUY", 0.30, 100)); ts += 1
+            trades.append(_t(ts, f"win_{i}", "SELL", 0.70, 100)); ts += 1
+        for i in range(3):  # then 3 LOSSES as the most recent outcomes
+            trades.append(_t(ts, f"loss_{i}", "BUY", 0.60, 100)); ts += 1
+            trades.append(_t(ts, f"loss_{i}", "SELL", 0.40, 100)); ts += 1
+
+        class Http:
+            async def get(self, url, params=None, **kwargs):
+                if url.endswith("/v1/leaderboard"):
+                    return _FakeResp(lb)
+                if url.endswith("/trades"):
+                    return _FakeResp(trades)
+                return _FakeResp([])
+
+        rejected = asyncio.run(discover_qualified_wallets(
+            Http(), categories=["OVERALL"], min_pnl=0.0,
+            min_win_rate=0.60, min_win_streak=2, min_total_trades=5,
+            max_loss_streak=3,
+        ))
+        self.assertEqual(rejected, [])
+
+        # Without the cutoff the same wallet qualifies (sanity that the only
+        # thing keeping it out above is the loss-streak gate).
+        ok = asyncio.run(discover_qualified_wallets(
+            Http(), categories=["OVERALL"], min_pnl=0.0,
+            min_win_rate=0.60, min_win_streak=2, min_total_trades=5,
+            max_loss_streak=0,
+        ))
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(ok[0]["current_loss_streak"], 3)
 
     def test_truncated_but_large_sample_can_qualify_with_higher_bar(self):
         """When closed-positions is at the cap, the required sample grows to

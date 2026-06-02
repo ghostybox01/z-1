@@ -22,6 +22,7 @@ from bot.agents.registry import agents_status
 from bot.agents.value_edge import ValueEdgeAgent
 from bot.agents.zscore_edge import ZScoreEdgeAgent
 from bot.copy_manager import CopyManager
+from bot.ev_math import copy_ev
 from bot.paper_portfolio import PaperPortfolio
 from bot.categories import MarketCategory
 from bot.cex import fetch_cex_bundle, infer_crypto_asset_from_text
@@ -883,6 +884,22 @@ class TradingBot:
                     skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "opposing_side_held"})
                     log.info("skip intent: opposing side already held for cond %s…", str(intent.condition_id)[:14])
                     continue
+                # EV-at-our-entry gate (copy intents only). We pay a follow-buffer
+                # (copy_price_buffer_bps) so a trade the whale profits on can be -EV
+                # for us. Using the source wallet's win rate as the success prob,
+                # skip copies whose EV per $1 (held to resolution) is below the floor.
+                if intent.strategy == "copy_trade":
+                    p = self._copy_manager.get_wallet_winrate(getattr(intent, "source_wallet", ""))
+                    entry = float(intent.max_price)  # already includes the follow-buffer
+                    min_ev = float(getattr(self.settings, "copy_min_ev", 0.02) or 0.0)
+                    if p is None or entry <= 0.0 or entry >= 1.0:
+                        reason = "ev_unknown_winrate" if p is None else "ev_bad_price"
+                        skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": reason})
+                        log.info("skip intent: %s (%s)", intent.strategy, reason); continue
+                    ev = copy_ev(p, entry)   # EV per $1 staked, held to resolution
+                    if ev < min_ev:
+                        skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": f"unprofitable_ev_{ev:.3f}"})
+                        log.info("skip intent: copy unprofitable at our entry (ev=%.3f < %.3f, p=%.2f, entry=%.3f)", ev, min_ev, p, entry); continue
                 await self._apply_intent_multipliers(intent)
                 disp = self._dispersion_for_intent(intent, cex_map)
                 if not await self._orderbook_gate_passes(intent):

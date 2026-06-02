@@ -381,6 +381,18 @@ async def analyze_wallet_quality(
             cur_streak = 0
         # pnl == 0 neither extends nor breaks a streak
 
+    # --- Current loss streak (consecutive LOSSES from most recent backwards) -
+    # ``merged`` is sorted oldest→newest above. Walk from the latest outcome
+    # backwards and count leading losses, stopping at the first win. A pnl==0
+    # outcome is neither a win nor a loss: it stops the loss run (it is not a
+    # loss) without itself being counted.
+    current_loss_streak = 0
+    for _, pnl in reversed(merged):
+        if pnl < -_PNL_EPSILON:
+            current_loss_streak += 1
+        else:
+            break
+
     # --- Backward-compatible aggregates -------------------------------------
     # wins/losses/verified_total now reflect the broader VERIFIED picture
     # (active round-trips + resolved held outcomes from /positions). ``total``
@@ -445,6 +457,7 @@ async def analyze_wallet_quality(
         "losses": losses,
         "win_rate": win_rate,  # may be None now — callers must handle
         "current_streak": cur_streak,
+        "current_loss_streak": current_loss_streak,
         "max_streak": max_streak,
         "total_pnl": observed_total_pnl,
         "avg_win": (sum(win_pnls) / len(win_pnls)) if win_pnls else 0.0,
@@ -481,6 +494,7 @@ async def discover_qualified_wallets(
     min_total_trades: int = 5,
     min_account_age_days: float = 0.0,
     min_profit_factor: float = 0.0,
+    max_loss_streak: int = 0,
 ) -> list[dict[str, Any]]:
     """Discover top wallets and filter by actual win rate and streak.
 
@@ -502,6 +516,16 @@ async def discover_qualified_wallets(
             http, cand["wallet"], leaderboard_pnl=cand.get("pnl")
         )
         merged = {**cand, **quality}
+
+        # Loss-streak cutoff. Drop wallets on a current losing run — even a
+        # high lifetime win rate doesn't justify copying a wallet that is
+        # actively bleeding right now.
+        if max_loss_streak > 0 and quality["current_loss_streak"] >= max_loss_streak:
+            merged["_rejected"] = (
+                f"loss_streak ({quality['current_loss_streak']} >= {max_loss_streak})"
+            )
+            log.info("leaderboard skip %s: %s", cand["wallet"][:12], merged["_rejected"])
+            continue
 
         # Sample-size gate. With truncated closed-positions, demand more.
         required_sample = (

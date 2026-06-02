@@ -106,6 +106,23 @@ def compute_ev(
     return result
 
 
+def copy_ev(p: float, entry: float) -> float:
+    """Expected value per $1 staked on a copy BUY held to resolution.
+
+    ``p`` is the success probability (the source wallet's verified win rate).
+    ``entry`` is OUR entry price per share, which already includes the
+    follow-buffer (``copy_price_buffer_bps``).
+
+    On a win we collect $1 per share, so $1 staked buys ``1/entry`` shares and
+    returns ``(1 - entry) / entry`` profit. On a loss we forfeit the $1 stake.
+
+        EV = p * (1 - entry) / entry - (1 - p)
+
+    Caller is responsible for guarding ``entry`` to ``(0, 1)``.
+    """
+    return p * (1.0 - entry) / entry - (1.0 - p)
+
+
 def resolution_time_gate(
     hours_to_resolution: Optional[float],
     *,

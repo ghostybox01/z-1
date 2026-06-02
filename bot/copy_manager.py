@@ -47,6 +47,7 @@ class WalletStats:
     losses: int = 0
     max_streak: int = 0
     current_streak: int = 0
+    current_loss_streak: int = 0
     total_pnl: float = 0.0
     source_category: str = ""
     user_name: str = ""
@@ -111,6 +112,9 @@ class CopyManager:
 
     def _min_win_streak(self) -> int:
         return int(getattr(self.settings, "copy_min_win_streak", 3) or 3)
+
+    def _max_loss_streak(self) -> int:
+        return int(getattr(self.settings, "copy_max_loss_streak", 3) or 0)
 
     def _min_total_trades(self) -> int:
         return int(getattr(self.settings, "copy_min_total_trades", 5) or 5)
@@ -187,6 +191,7 @@ class CopyManager:
             min_total_trades=self._min_total_trades(),
             min_account_age_days=self._min_account_age_days(),
             min_profit_factor=self._min_profit_factor(),
+            max_loss_streak=self._max_loss_streak(),
         )
 
         added = 0
@@ -203,6 +208,7 @@ class CopyManager:
                 st.losses = q.get("losses", st.losses)
                 st.max_streak = q.get("max_streak", st.max_streak)
                 st.current_streak = q.get("current_streak", st.current_streak)
+                st.current_loss_streak = q.get("current_loss_streak", st.current_loss_streak)
                 st.total_pnl = q.get("total_pnl", st.total_pnl)
                 st.account_age_days = q.get("account_age_days", 0) or 0
                 st.profit_factor = q.get("profit_factor", 0) or 0
@@ -224,6 +230,7 @@ class CopyManager:
                 losses=q.get("losses", 0),
                 max_streak=q.get("max_streak", 0),
                 current_streak=q.get("current_streak", 0),
+                current_loss_streak=q.get("current_loss_streak", 0),
                 total_pnl=q.get("total_pnl", 0),
                 source_category=q.get("category", "OVERALL"),
                 user_name=q.get("userName", ""),
@@ -296,6 +303,7 @@ class CopyManager:
             st.losses = quality["losses"]
             st.max_streak = quality["max_streak"]
             st.current_streak = quality["current_streak"]
+            st.current_loss_streak = quality.get("current_loss_streak", 0)
             st.total_pnl = quality["total_pnl"]
             age = quality.get("account_age_days", 0)
             pf = quality.get("profit_factor")
@@ -303,7 +311,15 @@ class CopyManager:
             st.profit_factor = pf or 0
             st.last_checked = time.time()
 
-            if quality["total"] >= min_trades and new_wr < prune_threshold:
+            loss_streak = quality.get("current_loss_streak", 0)
+            if self._max_loss_streak() > 0 and loss_streak >= self._max_loss_streak():
+                st.status = "pruned"
+                pruned += 1
+                log.info(
+                    "CopyManager PRUNED %s: loss_streak=%d >= %d threshold",
+                    w[:12], loss_streak, self._max_loss_streak(),
+                )
+            elif quality["total"] >= min_trades and new_wr < prune_threshold:
                 st.status = "pruned"
                 pruned += 1
                 log.info(
@@ -337,6 +353,26 @@ class CopyManager:
         ]
         upsert_many_kv({"copy_watch_wallets": json.dumps(watch)})
 
+    def get_wallet_winrate(self, wallet: str) -> float | None:
+        """Tracked verified win rate for a wallet, used as the EV success prob.
+
+        Case-insensitive lookup in the tracked wallet stats. Returns None when
+        the wallet is unknown OR has no resolved outcomes (wins+losses == 0),
+        since a zero-sample win rate carries no information for the EV gate.
+        """
+        w = str(wallet or "").strip().lower()
+        if not w:
+            return None
+        st = self.state.wallet_stats.get(w)
+        if st is None:
+            return None
+        if int(st.wins + st.losses) <= 0:
+            return None
+        wr = st.win_rate
+        if wr is None or wr <= 0.0:
+            return None
+        return float(wr)
+
     def get_managed_wallets(self) -> list[dict[str, Any]]:
         """Return all tracked wallets with their stats for the dashboard."""
         out = []
@@ -349,6 +385,7 @@ class CopyManager:
                 "losses": st.losses,
                 "max_streak": st.max_streak,
                 "current_streak": st.current_streak,
+                "current_loss_streak": st.current_loss_streak,
                 "total_pnl": st.total_pnl,
                 "account_age_days": st.account_age_days,
                 "profit_factor": st.profit_factor,

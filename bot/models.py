@@ -31,6 +31,8 @@ class TradeIntent:
     bundle_id: Optional[str] = None
     # Phase 2: hours until market resolution (for EV time-discount gate).
     hours_to_resolution: Optional[float] = None
+    # Copy-trade: source wallet whose trade we're following (for the EV-at-our-entry gate).
+    source_wallet: str = ""
 
 
 @dataclass
