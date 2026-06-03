@@ -9,6 +9,7 @@ COMPLETELY ISOLATED from copy-trade logic — separate file, separate propose() 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -299,6 +300,8 @@ class WeatherArbAgent:
             # Fetch forecast (cached per city+unit within this cycle)
             cache_key = (city_key, unit)
             if cache_key not in self._forecast_cache:
+                # Rate-limit Open-Meteo: they 429 on rapid-fire city fetches
+                await asyncio.sleep(0.3)
                 try:
                     temp_unit_param = "fahrenheit" if unit == "F" else "celsius"
                     resp = await http.get(
