@@ -334,6 +334,8 @@ class WeatherArbAgent:
                         "WeatherArbAgent: forecast fetch failed for %s (%s): %s",
                         city_key, unit, exc
                     )
+                    # Cache the failure so we don't re-429 the same city 5× per cycle
+                    self._forecast_cache[cache_key] = {}
                     forecast_errors += 1
                     continue
 
