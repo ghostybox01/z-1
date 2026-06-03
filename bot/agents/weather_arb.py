@@ -165,7 +165,38 @@ class WeatherArbAgent:
         # Cache: (city_key, unit) → {date_str: max_temp}; reset each cycle
         self._forecast_cache: dict[tuple[str, str], dict[str, float]] = {}
         self._forecast_cache_date: str = ""
+        self._cache_file = "/tmp/weather_forecast_cache.json"
+        self._load_disk_cache()
         self.last_note: str = ""
+
+    def _load_disk_cache(self) -> None:
+        """Load forecast cache from disk so it survives restarts (Open-Meteo
+        has a daily request quota — burning it on repeated restarts is the #1
+        operational failure this agent hit)."""
+        try:
+            import json as _json
+            with open(self._cache_file) as f:
+                data = _json.load(f)
+            self._forecast_cache_date = data.get("date", "")
+            for k, v in data.get("forecasts", {}).items():
+                city, unit = k.split("|", 1)
+                self._forecast_cache[(city, unit)] = v
+            log.info("WeatherArbAgent: loaded %d cached forecasts from disk (date=%s)",
+                     len(self._forecast_cache), self._forecast_cache_date)
+        except Exception:
+            pass
+
+    def _save_disk_cache(self) -> None:
+        try:
+            import json as _json
+            data = {
+                "date": self._forecast_cache_date,
+                "forecasts": {f"{k[0]}|{k[1]}": v for k, v in self._forecast_cache.items()},
+            }
+            with open(self._cache_file, "w") as f:
+                _json.dump(data, f)
+        except Exception:
+            pass
 
     async def propose(self, http: httpx.AsyncClient) -> list[TradeIntent]:
         if not getattr(self.settings, "agent_weather", False):
@@ -329,6 +360,7 @@ class WeatherArbAgent:
                     self._forecast_cache[cache_key] = {
                         d: t for d, t in zip(dates_list, temps_list) if t is not None
                     }
+                    self._save_disk_cache()
                 except Exception as exc:
                     log.warning(
                         "WeatherArbAgent: forecast fetch failed for %s (%s): %s",
