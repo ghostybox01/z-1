@@ -164,6 +164,7 @@ class WeatherArbAgent:
         self.settings = settings
         # Cache: (city_key, unit) → {date_str: max_temp}; reset each cycle
         self._forecast_cache: dict[tuple[str, str], dict[str, float]] = {}
+        self._forecast_cache_date: str = ""
         self.last_note: str = ""
 
     async def propose(self, http: httpx.AsyncClient) -> list[TradeIntent]:
@@ -171,8 +172,12 @@ class WeatherArbAgent:
             self.last_note = "disabled"
             return []
 
-        # Reset per-cycle forecast cache
-        self._forecast_cache = {}
+        # Persist forecast cache across cycles (data is daily, doesn't change
+        # every 30s). Only clear when the UTC date rolls over.
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        if self._forecast_cache_date != today_utc:
+            self._forecast_cache = {}
+            self._forecast_cache_date = today_utc
 
         min_edge = float(getattr(self.settings, "weather_min_edge", 0.12))
         sigma = float(getattr(self.settings, "weather_sigma", 1.6))
