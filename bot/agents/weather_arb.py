@@ -271,14 +271,21 @@ class WeatherArbAgent:
                 skipped_date += 1
                 continue
 
-            # CRITICAL: skip same-day markets past noon UTC (the high may already have
-            # happened — this is the "settled artifact" trap)
-            if target_date == today_str and now_utc.hour >= 12:
-                log.debug(
-                    "WeatherArbAgent: same-day market past noon UTC, skipping %s", question[:80]
-                )
-                skipped_date += 1
-                continue
+            # Same-day guard: skip only when the daily high has likely already set
+            # in the TARGET CITY's local time zone. Typical high: 2-4pm local.
+            # Approximation: UTC hour + city's longitude-based offset > 14 (2pm local).
+            # This lets the agent trade morning markets (the edge window) instead of
+            # blanket-skipping everything after noon UTC (which killed ALL 42 markets).
+            if target_date == today_str:
+                tz_offset_h = lon / 15.0  # rough: 15° per hour
+                local_hour_approx = now_utc.hour + tz_offset_h
+                if local_hour_approx >= 14.0:
+                    log.debug(
+                        "WeatherArbAgent: same-day market, local ~%d:00, high likely set — skipping %s",
+                        int(local_hour_approx), question[:60]
+                    )
+                    skipped_date += 1
+                    continue
 
             # Volume filter
             try:

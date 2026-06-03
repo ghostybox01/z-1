@@ -243,12 +243,14 @@ def _make_market(question: str, volume: float = 5000.0) -> dict:
 
 def test_same_day_past_noon_skipped():
     """
-    A market resolving today, scanned after noon UTC, should be skipped.
+    A market resolving today in a city whose local time is past 2pm
+    (i.e. the daily high has likely already set) should be skipped.
+    Use Seoul (lon ~127°): at UTC 14:00, local ≈ 22:30 → well past 14:00 local.
     """
     async def _run():
         today = datetime.now(timezone.utc)
         today_str = today.strftime("%B %-d, %Y")  # e.g. "June 3, 2026"
-        question = f"Will the highest temperature in New York be 28°C on {today_str}?"
+        question = f"Will the highest temperature in Seoul be 28°C on {today_str}?"
 
         market = _make_market(question, volume=10000.0)
 
