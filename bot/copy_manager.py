@@ -24,6 +24,7 @@ from bot.leaderboard import (
     discover_qualified_wallets,
     CATEGORIES as LB_CATEGORIES,
 )
+from bot.weather_discovery import discover_weather_specialists
 
 log = logging.getLogger("polymarket.copy_manager")
 
@@ -156,6 +157,11 @@ class CopyManager:
             # 2. Re-check existing wallets and prune underperformers
             prune_count = await self._check_and_prune(http)
             result["pruned"] = prune_count
+
+            # 2b. Discover weather-specialist wallets from live temp-market traders
+            weather_count = await self._discover_weather_specialists(http)
+            result["weather_added"] = weather_count
+            result["added"] += weather_count
 
             # 3. Persist updated wallet list to DB
             self._persist_wallets()
@@ -343,6 +349,78 @@ class CopyManager:
 
         self.state.total_pruned += pruned
         return pruned
+
+    async def _discover_weather_specialists(self, http: httpx.AsyncClient) -> int:
+        """Discover weather/temperature-market specialist wallets and add them.
+
+        Gated on ``weather_discovery_enabled``. Finds wallets that trade many
+        distinct weather markets with a high verified win-rate (loss-visibility
+        must be 'verified'), then adds any not-already-tracked wallet as an
+        ``active`` ``WalletStats`` tagged ``source_category="weather"`` so the
+        copy agent follows them. Respects the ``_max_wallets()`` cap.
+        """
+        if not bool(getattr(self.settings, "weather_discovery_enabled", True)):
+            return 0
+
+        try:
+            specialists = await discover_weather_specialists(
+                http,
+                min_total_trades=int(getattr(self.settings, "weather_discovery_min_trades", 100.0) or 100),
+                min_win_rate=float(getattr(self.settings, "weather_discovery_min_win_rate", 0.80) or 0.80),
+            )
+        except Exception as e:
+            log.warning("weather specialist discovery failed: %s", e)
+            return 0
+
+        added = 0
+        max_w = self._max_wallets()
+        active_count = sum(1 for s in self.state.wallet_stats.values() if s.status == "active")
+
+        for spec in specialists:
+            w = str(spec.get("wallet") or "").strip().lower()
+            if not w:
+                continue
+            wr = spec.get("win_rate")
+            wins = int(spec.get("wins", 0) or 0)
+            losses = int(spec.get("losses", 0) or 0)
+            if w in self.state.wallet_stats:
+                # Refresh stats for an already-tracked wallet; resurrect if pruned.
+                st = self.state.wallet_stats[w]
+                if wr is not None:
+                    st.win_rate = wr
+                st.wins = wins
+                st.losses = losses
+                st.account_age_days = spec.get("account_age_days", 0) or 0
+                st.profit_factor = spec.get("profit_factor", 0) or 0
+                st.last_checked = time.time()
+                if st.status == "pruned":
+                    st.status = "active"
+                    added += 1
+                continue
+
+            if active_count + added >= max_w:
+                break
+
+            self.state.wallet_stats[w] = WalletStats(
+                wallet=w,
+                added_at=time.time(),
+                last_checked=time.time(),
+                win_rate=wr if wr is not None else 0.0,
+                wins=wins,
+                losses=losses,
+                source_category="weather",
+                status="active",
+                account_age_days=spec.get("account_age_days", 0) or 0,
+                profit_factor=spec.get("profit_factor", 0) or 0,
+            )
+            added += 1
+
+        self.state.total_added += added
+        log.info(
+            "CopyManager weather discovery: %d specialists found, %d added",
+            len(specialists), added,
+        )
+        return added
 
     def _persist_wallets(self) -> None:
         """Write the active wallet list back to copy_watch_wallets in DB."""

@@ -94,6 +94,9 @@ def default_kv_seed() -> dict[str, str]:
         "weather_sigma": "1.6",
         "weather_min_volume_24h": "500.0",
         "weather_max_markets_per_cycle": "5",
+        "weather_discovery_enabled": "true",
+        "weather_discovery_min_trades": "100",
+        "weather_discovery_min_win_rate": "0.80",
         "latency_min_dislocation_bps": "120",
         "bundle_max_pair_cost": "0.994",
         "bundle_min_liquidity_usd": "1500",
@@ -238,6 +241,9 @@ class Settings:
     weather_sigma: float = 1.6
     weather_min_volume_24h: float = 500.0
     weather_max_markets_per_cycle: int = 5
+    weather_discovery_enabled: bool = True
+    weather_discovery_min_trades: float = 100.0
+    weather_discovery_min_win_rate: float = 0.80
     latency_min_dislocation_bps: float = 120.0
     bundle_max_pair_cost: float = 0.994
     bundle_min_liquidity_usd: float = 1500.0
@@ -478,6 +484,9 @@ class Settings:
             weather_sigma=_f(g("weather_sigma", "1.6"), 1.6),
             weather_min_volume_24h=_f(g("weather_min_volume_24h", "500.0"), 500.0),
             weather_max_markets_per_cycle=_i(g("weather_max_markets_per_cycle", "5"), 5),
+            weather_discovery_enabled=_b(g("weather_discovery_enabled", "true"), True),
+            weather_discovery_min_trades=_f(g("weather_discovery_min_trades", "100"), 100.0),
+            weather_discovery_min_win_rate=_f(g("weather_discovery_min_win_rate", "0.80"), 0.80),
             latency_min_dislocation_bps=_f(g("latency_min_dislocation_bps", "120"), 120.0),
             bundle_max_pair_cost=_f(g("bundle_max_pair_cost", "0.994"), 0.994),
             bundle_min_liquidity_usd=_f(g("bundle_min_liquidity_usd", "1500"), 1500.0),
