@@ -32,8 +32,9 @@ from bot.gamma import scan_tradeable_markets
 from bot.http_retry import get_json_retry
 from bot.models import BotState, TradeIntent, TradeRecord, utc_now_iso
 from bot.reconcile import reconcile_trade_records_inplace, snapshot_open_orders
-from bot.db.kv import append_paper_trade_log, append_trade_log
+from bot.db.kv import append_paper_trade_log, append_trade_log, load_all_kv, upsert_many_kv
 from bot.db.models import TradeLog, session_scope
+from bot.resolved_record import compute_resolved_record
 from bot.exposure import category_exposure_usd, condition_exposure_usd, rolling_notional_usd
 from bot.execution_plan import plan_execution_units
 from bot.market_intel import hours_until_resolution_end
@@ -80,6 +81,18 @@ class TradingBot:
         self._geoblocked_tokens: Set[str] = set()
         # Process-local idempotency guard: short hashes of recently-submitted intents
         self._recent_submit_keys: set[str] = set()
+        # Resolved-record tracker: persistent cache of {token_id: "won"|"lost"}
+        self._resolved_cache: dict[str, str] = {}
+        self._last_resolved_update: float = 0.0
+        try:
+            kv = load_all_kv()
+            raw = kv.get("resolved_outcomes", "")
+            if raw:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    self._resolved_cache = loaded
+        except Exception:
+            pass
 
         w = self.settings.wallet_address
         log.info(
@@ -1022,6 +1035,15 @@ class TradingBot:
             self.state.total_pnl = paper["unrealized_pnl"]
 
         self.state.errors = self.state.errors[-25:]
+
+        # Resolved-record update — throttled to once per 300s.
+        _resolved_interval = 300.0
+        if self._http and (time.monotonic() - self._last_resolved_update) >= _resolved_interval:
+            try:
+                await self.update_resolved_record()
+            except Exception as _rr_exc:
+                log.warning("update_resolved_record: %s", _rr_exc)
+
         log.info("——— cycle end placed=%s ———", placed)
         slog(
             log,
@@ -1235,6 +1257,39 @@ class TradingBot:
 
         return True
 
+    async def update_resolved_record(self) -> None:
+        """Resolve outcomes for all trade-log rows and compute win-rate + P&L."""
+        from sqlalchemy import select as sa_select
+
+        def _load_trades() -> list[dict]:
+            rows = []
+            with session_scope() as s:
+                for r in s.scalars(sa_select(TradeLog)).all():
+                    rows.append({
+                        "condition_id": str(r.condition_id or ""),
+                        "token_id": str(r.token_id or ""),
+                        "cost_usd": float(r.cost_usd or 0.0),
+                        "price": float(r.price or 0.0),
+                        "strategy": str(r.strategy or "unknown"),
+                    })
+            return rows
+
+        trades = await asyncio.to_thread(_load_trades)
+        record = await compute_resolved_record(self._http, trades, self._resolved_cache)
+        self.state.resolved_record = record
+
+        def _persist_cache() -> None:
+            upsert_many_kv({"resolved_outcomes": json.dumps(self._resolved_cache)})
+
+        await asyncio.to_thread(_persist_cache)
+        self._last_resolved_update = time.monotonic()
+        log.debug(
+            "resolved_record updated: overall wins=%s losses=%s pending=%s",
+            record.get("overall", {}).get("wins"),
+            record.get("overall", {}).get("losses"),
+            record.get("overall", {}).get("pending"),
+        )
+
     async def run_forever(self):
         self._running = True
         self.state.running = True
@@ -1343,6 +1398,7 @@ class TradingBot:
             "paper_portfolio": self._paper_portfolio.get_summary(),
             "has_private_key": bool(self.settings.polymarket_private_key),
             "position_summary": self.state.position_summary,
+            "resolved_record": self.state.resolved_record,
             "total_equity_usd": round(float(self.state.usdc_balance or 0) + float(self.state.portfolio_value or 0), 2),
             "total_pnl_usd": round(
                 float(self.state.usdc_balance or 0) + float(self.state.portfolio_value or 0)

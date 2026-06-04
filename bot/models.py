@@ -82,6 +82,8 @@ class BotState:
     # Per-agent runtime diagnostics from last cycle (keyed by agent id).
     cycle_agent_runtime: dict[str, dict[str, Any]] = field(default_factory=dict)
     position_summary: dict[str, Any] = field(default_factory=dict)
+    # Persistent resolved-record: true win-rate + realized P&L per strategy.
+    resolved_record: dict[str, Any] = field(default_factory=dict)
 
 
 def utc_now_iso() -> str:

@@ -431,6 +431,32 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
 .sb-value.pos { color: var(--accent); }
 .sb-value.neg { color: var(--danger); }
 .sb-value.muted { color: var(--muted); font-size: 0.82rem; }
+
+/* Resolved Record panel */
+.rr-panel { margin-bottom: 16px; }
+.rr-overall {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  margin-bottom: 10px;
+}
+.rr-win-rate { font-size: 1.05rem; font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: var(--accent); }
+.rr-pnl-pos { font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: var(--accent); }
+.rr-pnl-neg { font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: var(--danger); }
+.rr-pending { color: var(--muted); font-size: 0.78rem; }
+.rr-strat-list { margin-top: 6px; }
+.rr-strat-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid #121820;
+  font-size: 0.76rem;
+}
+.rr-strat-name { min-width: 140px; color: var(--muted); font-family: 'IBM Plex Mono', monospace; }
+.rr-strat-stat { color: var(--text); }
 </style>
 </head>
 <body>
@@ -539,6 +565,13 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
     <div class="cs-card"><div class="cs-label">Markets scanned</div><div class="cs-value mono" id="scanned">0</div><div class="cs-sub" id="lastScan">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Resting orders</div><div class="cs-value mono" id="openOrders">0</div><div class="cs-sub">not positions</div><div class="cs-sub" id="reconcileMeta">&mdash;</div></div>
     <div class="cs-card"><div class="cs-label">Default bet</div><div class="cs-value mono" id="betSize">$5</div><div class="cs-sub" id="betRange">min &ndash; max</div></div>
+  </div>
+
+  <!-- Resolved Record panel -->
+  <div id="resolvedRecordPanel" class="section rr-panel" style="display:none;">
+    <h2>Resolved Record <span id="rrBadge" class="badge" style="font-size:0.62rem;"></span></h2>
+    <div class="rr-overall" id="rrOverall"></div>
+    <div class="rr-strat-list" id="rrStratList"></div>
   </div>
 
   <!-- Real vs Paper scoreboard -->
@@ -957,6 +990,53 @@ function renderCycleDecisions(d) {
   el.innerHTML = html;
 }
 
+function renderResolvedRecord(d) {
+  const panel = document.getElementById('resolvedRecordPanel');
+  const rr = d.resolved_record || {};
+  const overall = rr.overall || {};
+  const byStrat = rr.by_strategy || {};
+  const wins = overall.wins || 0;
+  const losses = overall.losses || 0;
+  const pending = overall.pending || 0;
+  const resolved = wins + losses;
+  if (resolved === 0 && pending === 0) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  const badge = document.getElementById('rrBadge');
+  badge.textContent = resolved + ' resolved';
+
+  const pnl = overall.realized_pnl != null ? overall.realized_pnl : 0;
+  const wr = overall.win_rate != null ? (overall.win_rate * 100).toFixed(1) + '%' : '—';
+  const pnlCls = pnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
+  const pnlStr = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+
+  document.getElementById('rrOverall').innerHTML =
+    '<span class="rr-win-rate">Win rate: ' + escHtml(wr) + '</span>' +
+    '<span style="color:var(--muted);font-size:0.78rem;">(' + wins + 'W / ' + losses + 'L)</span>' +
+    '<span class="rr-sep" style="color:var(--border);">·</span>' +
+    '<span>Realized P&amp;L: <span class="' + pnlCls + '">' + escHtml(pnlStr) + '</span></span>' +
+    (pending > 0 ? '<span class="rr-pending">· ' + pending + ' pending</span>' : '');
+
+  const stratKeys = Object.keys(byStrat).sort();
+  if (!stratKeys.length) { document.getElementById('rrStratList').innerHTML = ''; return; }
+  document.getElementById('rrStratList').innerHTML =
+    stratKeys.map(k => {
+      const s = byStrat[k] || {};
+      const sw = s.wins || 0;
+      const sl = s.losses || 0;
+      const sp = s.pending || 0;
+      const swr = (sw + sl) > 0 ? ((sw / (sw + sl)) * 100).toFixed(0) + '%' : '—';
+      const spnl = s.realized_pnl != null ? s.realized_pnl : 0;
+      const spnlCls = spnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
+      const spnlStr = (spnl >= 0 ? '+$' : '-$') + Math.abs(spnl).toFixed(2);
+      return '<div class="rr-strat-row">' +
+        '<span class="rr-strat-name">' + escHtml(k) + '</span>' +
+        '<span class="rr-strat-stat">' + escHtml(swr) + ' (' + sw + 'W / ' + sl + 'L' + (sp > 0 ? ', ' + sp + ' pending' : '') + ')</span>' +
+        '<span class="' + spnlCls + '" style="font-family:\'IBM Plex Mono\',monospace;font-size:0.74rem;">' + escHtml(spnlStr) + '</span>' +
+        '</div>';
+    }).join('');
+}
+
 function updateUI(d) {
   const st = d.settings || {};
 
@@ -975,6 +1055,7 @@ function updateUI(d) {
 
   // --- Section: Setup card + diagnostic banners + scoreboard ---
   try { updateSetupCard(d); } catch (e) { console.warn('render section failed [setupCard]', e); }
+  try { renderResolvedRecord(d); } catch (e) { console.warn('render section failed [resolvedRecord]', e); }
   try { renderScoreboard(d); } catch (e) { console.warn('render section failed [scoreboard]', e); }
   try { renderDiagBanners(d); } catch (e) { console.warn('render section failed [diagBanners]', e); }
 
