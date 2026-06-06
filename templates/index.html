@@ -998,8 +998,10 @@ function renderResolvedRecord(d) {
   const wins = overall.wins || 0;
   const losses = overall.losses || 0;
   const pending = overall.pending || 0;
+  const leanWins = overall.leaning_wins || 0;
+  const leanLosses = overall.leaning_losses || 0;
   const resolved = wins + losses;
-  if (resolved === 0 && pending === 0) { panel.style.display = 'none'; return; }
+  if (resolved === 0 && pending === 0 && leanWins === 0 && leanLosses === 0) { panel.style.display = 'none'; return; }
   panel.style.display = '';
 
   const badge = document.getElementById('rrBadge');
@@ -1010,12 +1012,26 @@ function renderResolvedRecord(d) {
   const pnlCls = pnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
   const pnlStr = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
 
+  // Open positions, value-aware: losing / winning / genuinely in-play (no longer hidden as "pending").
+  const upnl = overall.unrealized_pnl != null ? overall.unrealized_pnl : 0;
+  const openParts = [];
+  if (leanLosses > 0) openParts.push('<span class="rr-pnl-neg">' + leanLosses + ' losing</span>');
+  if (leanWins > 0) openParts.push('<span class="rr-pnl-pos">' + leanWins + ' winning</span>');
+  if (pending > 0) openParts.push('<span style="color:var(--muted);">' + pending + ' in-play</span>');
+  let openStr = '';
+  if (openParts.length) {
+    const upnlCls = upnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
+    const upnlStr = (upnl >= 0 ? '+$' : '-$') + Math.abs(upnl).toFixed(2);
+    openStr = ' <span style="font-size:0.78rem;">Open: ' + openParts.join(', ') +
+      ' <span class="' + upnlCls + '">(unreal. ' + escHtml(upnlStr) + ')</span></span>';
+  }
+
   document.getElementById('rrOverall').innerHTML =
     '<span class="rr-win-rate">Win rate: ' + escHtml(wr) + '</span>' +
     '<span style="color:var(--muted);font-size:0.78rem;">(' + wins + 'W / ' + losses + 'L)</span>' +
     '<span class="rr-sep" style="color:var(--border);">·</span>' +
     '<span>Realized P&amp;L: <span class="' + pnlCls + '">' + escHtml(pnlStr) + '</span></span>' +
-    (pending > 0 ? '<span class="rr-pending">· ' + pending + ' pending</span>' : '');
+    openStr;
 
   const stratKeys = Object.keys(byStrat).sort();
   if (!stratKeys.length) { document.getElementById('rrStratList').innerHTML = ''; return; }
@@ -1025,13 +1041,20 @@ function renderResolvedRecord(d) {
       const sw = s.wins || 0;
       const sl = s.losses || 0;
       const sp = s.pending || 0;
+      const sll = s.leaning_losses || 0;
+      const slw = s.leaning_wins || 0;
+      const openBits = [];
+      if (sll > 0) openBits.push(sll + ' losing');
+      if (slw > 0) openBits.push(slw + ' winning');
+      if (sp > 0) openBits.push(sp + ' in-play');
+      const openTxt = openBits.length ? ', ' + openBits.join(', ') : '';
       const swr = (sw + sl) > 0 ? ((sw / (sw + sl)) * 100).toFixed(0) + '%' : '—';
       const spnl = s.realized_pnl != null ? s.realized_pnl : 0;
       const spnlCls = spnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
       const spnlStr = (spnl >= 0 ? '+$' : '-$') + Math.abs(spnl).toFixed(2);
       return '<div class="rr-strat-row">' +
         '<span class="rr-strat-name">' + escHtml(k) + '</span>' +
-        '<span class="rr-strat-stat">' + escHtml(swr) + ' (' + sw + 'W / ' + sl + 'L' + (sp > 0 ? ', ' + sp + ' pending' : '') + ')</span>' +
+        '<span class="rr-strat-stat">' + escHtml(swr) + ' (' + sw + 'W / ' + sl + 'L' + openTxt + ')</span>' +
         '<span class="' + spnlCls + '" style="font-family:\'IBM Plex Mono\',monospace;font-size:0.74rem;">' + escHtml(spnlStr) + '</span>' +
         '</div>';
     }).join('');

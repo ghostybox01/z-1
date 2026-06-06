@@ -5,7 +5,35 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from bot.copy_rules import build_candidate, passes_filters, wallet_score
+from bot.copy_rules import build_candidate, event_key, passes_filters, wallet_score
+
+
+class TestEventKey(unittest.TestCase):
+    def test_hormuz_date_variants_collapse(self):
+        a = event_key("Strait of Hormuz traffic returns to normal by July 31")
+        b = event_key("Strait of Hormuz traffic returns to normal by August 31")
+        self.assertEqual(a, b)
+        self.assertEqual(a, "strait of hormuz traffic returns to normal")
+
+    def test_temperature_buckets_collapse_per_city(self):
+        a = event_key("Will the highest temperature in London be 18C")
+        b = event_key("Will the highest temperature in London be 19C")
+        self.assertEqual(a, b)
+
+    def test_different_cities_do_not_collapse(self):
+        london = event_key("Will the highest temperature in London be 18C")
+        hk = event_key("Will the highest temperature in Hong Kong be 30C")
+        self.assertNotEqual(london, hk)
+
+    def test_distinct_events_stay_distinct(self):
+        a = event_key("Will Turkiye win the 2026 FIFA World Cup?")
+        b = event_key("Will the Bank of Israel make no change to the interest rate")
+        self.assertNotEqual(a, b)
+        self.assertNotEqual(a, "")
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(event_key(""), "")
+        self.assertEqual(event_key(None), "")
 
 
 def _settings(**kw):

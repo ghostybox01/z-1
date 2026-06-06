@@ -108,6 +108,35 @@ class TestResolveToken(unittest.IsolatedAsyncioTestCase):
         result = await resolve_token(http, "cid1", "tok1")
         self.assertIsNone(result)
 
+    # --- value-aware: open market whose price has already decided ---
+    async def test_open_price_collapsed_returns_losing(self):
+        http = _mock_http(
+            body={"closed": False, "tokens": [{"token_id": "tok1", "price": 0.02}]}
+        )
+        result = await resolve_token(http, "cid1", "tok1")
+        self.assertEqual(result, "losing")
+
+    async def test_open_price_spiked_returns_winning(self):
+        http = _mock_http(
+            body={"closed": False, "tokens": [{"token_id": "tok1", "price": 0.98}]}
+        )
+        result = await resolve_token(http, "cid1", "tok1")
+        self.assertEqual(result, "winning")
+
+    async def test_open_price_midrange_returns_open(self):
+        http = _mock_http(
+            body={"closed": False, "tokens": [{"token_id": "tok1", "price": 0.5}]}
+        )
+        result = await resolve_token(http, "cid1", "tok1")
+        self.assertEqual(result, "open")
+
+    async def test_open_token_absent_returns_open(self):
+        http = _mock_http(
+            body={"closed": False, "tokens": [{"token_id": "other", "price": 0.01}]}
+        )
+        result = await resolve_token(http, "cid1", "tok1")
+        self.assertEqual(result, "open")
+
 
 class TestComputeResolvedRecord(unittest.IsolatedAsyncioTestCase):
     """Unit tests for compute_resolved_record."""
@@ -261,6 +290,60 @@ class TestComputeResolvedRecord(unittest.IsolatedAsyncioTestCase):
         ]
         await compute_resolved_record(http, trades, cache)
         self.assertEqual(call_count, 1)
+
+    async def test_losing_lean_counted_not_pending(self):
+        """A still-open position collapsed to ~0 must show as a leaning loss, not pending."""
+        cache: dict = {}
+        trades = [{"condition_id": "c1", "token_id": "t1", "cost_usd": 2.0, "price": 0.4, "strategy": "weather_arb"}]
+        http = _mock_http(body={"closed": False, "tokens": [{"token_id": "t1", "price": 0.001}]})
+        result = await compute_resolved_record(http, trades, cache)
+        w = result["by_strategy"]["weather_arb"]
+        self.assertEqual(w["leaning_losses"], 1)
+        self.assertEqual(w["pending"], 0)
+        self.assertEqual(w["losses"], 0)            # NOT realized yet
+        self.assertNotIn("t1", cache)               # leans are not cached
+        self.assertAlmostEqual(w["unrealized_pnl"], -2.0, places=4)
+        self.assertAlmostEqual(w["realized_pnl"], 0.0, places=4)
+
+    async def test_winning_lean_counted(self):
+        """A still-open position spiked to ~1 must show as a leaning win with unrealized gain."""
+        cache: dict = {}
+        trades = [{"condition_id": "c1", "token_id": "t1", "cost_usd": 4.0, "price": 0.4, "strategy": "copy_trade"}]
+        http = _mock_http(body={"closed": False, "tokens": [{"token_id": "t1", "price": 0.99}]})
+        result = await compute_resolved_record(http, trades, cache)
+        c = result["by_strategy"]["copy_trade"]
+        self.assertEqual(c["leaning_wins"], 1)
+        self.assertEqual(c["pending"], 0)
+        # shares = 4/0.4 = 10; unrealized = 10 - 4 = 6
+        self.assertAlmostEqual(c["unrealized_pnl"], 6.0, places=4)
+
+    async def test_exited_position_not_counted_as_lean(self):
+        """An open-market token we no longer hold (sold/redeemed) is 'exited', not a lean.
+
+        Mirrors the manually-closed weather bet: TradeLog still has the buy, the
+        token now prices at ~1, but it is gone from the wallet, so it must not
+        inflate leaning_wins.
+        """
+        cache: dict = {}
+        trades = [{"condition_id": "c1", "token_id": "tSOLD", "cost_usd": 2.0, "price": 0.5, "strategy": "weather_arb"}]
+        http = _mock_http(body={"closed": False, "tokens": [{"token_id": "tSOLD", "price": 0.9995}]})
+        result = await compute_resolved_record(http, trades, cache, held_tokens=set())
+        w = result["by_strategy"]["weather_arb"]
+        self.assertEqual(w["exited"], 1)
+        self.assertEqual(w["leaning_wins"], 0)
+        self.assertEqual(w["pending"], 0)
+        self.assertAlmostEqual(w["unrealized_pnl"], 0.0, places=4)
+
+    async def test_held_losing_position_still_counts_as_lean(self):
+        """A losing token we DO still hold remains a leaning loss (not exited)."""
+        cache: dict = {}
+        trades = [{"condition_id": "c1", "token_id": "tHELD", "cost_usd": 2.0, "price": 0.4, "strategy": "weather_arb"}]
+        http = _mock_http(body={"closed": False, "tokens": [{"token_id": "tHELD", "price": 0.001}]})
+        result = await compute_resolved_record(http, trades, cache, held_tokens={"tHELD"})
+        w = result["by_strategy"]["weather_arb"]
+        self.assertEqual(w["leaning_losses"], 1)
+        self.assertEqual(w["exited"], 0)
+        self.assertAlmostEqual(w["unrealized_pnl"], -2.0, places=4)
 
 
 if __name__ == "__main__":

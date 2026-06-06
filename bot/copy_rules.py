@@ -3,11 +3,42 @@
 from __future__ import annotations
 
 import math
+import re
 from statistics import median
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from bot.categories import classify_market
+
+# --- Event grouping -------------------------------------------------------
+# Collapse date-/threshold-variant markets of the SAME underlying event to one
+# key, so we can cap exposure per real-world event across distinct condition_ids
+# (e.g. "Strait of Hormuz ... by July 31" and "... by Aug 31" → one event).
+_DATE_TAIL_RE = re.compile(r"\b(by|before|after|on|between)\b.*$")
+_MONTH_RE = re.compile(
+    r"\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|aug(ust)?|"
+    r"sep(t)?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?)\b"
+)
+_NUM_RE = re.compile(r"\b\d+(st|nd|rd|th)?\b")
+_NONWORD_RE = re.compile(r"[^a-z ]+")
+_WS_RE = re.compile(r"\s+")
+
+
+def event_key(text: str) -> str:
+    """Normalize a market question/title to a coarse real-world-event key.
+
+    Strips trailing date qualifiers ("by July 31"), month names, years, day
+    numbers and thresholds, then punctuation, so that variant markets of one
+    event collapse together.  Returns "" for empty input (callers must treat an
+    empty key as "no grouping" to avoid collapsing unrelated blanks).
+    """
+    t = (text or "").lower().strip()
+    t = _DATE_TAIL_RE.sub("", t)
+    t = _MONTH_RE.sub("", t)
+    t = _NUM_RE.sub("", t)
+    t = _NONWORD_RE.sub(" ", t)
+    t = _WS_RE.sub(" ", t).strip()
+    return t
 
 
 @dataclass

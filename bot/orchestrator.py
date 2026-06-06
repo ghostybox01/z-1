@@ -35,6 +35,7 @@ from bot.reconcile import reconcile_trade_records_inplace, snapshot_open_orders
 from bot.db.kv import append_paper_trade_log, append_trade_log, load_all_kv, upsert_many_kv
 from bot.db.models import TradeLog, session_scope
 from bot.resolved_record import compute_resolved_record
+from bot.copy_rules import event_key
 from bot.exposure import category_exposure_usd, condition_exposure_usd, rolling_notional_usd
 from bot.execution_plan import plan_execution_units
 from bot.market_intel import hours_until_resolution_end
@@ -250,14 +251,18 @@ class TradingBot:
                 return
             except Exception:
                 pass  # fall through to on-chain fallback
-        # Fallback: on-chain ERC-20 balance (wallet not yet deposited to exchange)
+        # Fallback: on-chain ERC-20 balance of the proxy wallet. Must query the
+        # CLOB V2 collateral PolyUSD (0xC011a7E1…), NOT the old bridged USDC.e
+        # (0x2791Bca1…). Querying USDC.e read $0 while real cash sat in PolyUSD,
+        # so when the primary get_balance_allowance call errored the bot wrongly
+        # saw $0 and skipped every trade ("Balance below min bet").
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "eth_call",
             "params": [
                 {
-                    "to": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                    "to": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
                     "data": "0x70a08231000000000000000000000000"
                     + self.settings.wallet_address[2:],
                 },
@@ -808,6 +813,10 @@ class TradingBot:
             )
             condition_extra: dict[str, float] = {}
             category_extra: dict[str, float] = {}
+            # Real-world events we have already taken a copy position in THIS cycle,
+            # so a second market (different condition_id) on the same event is skipped
+            # before positions refresh next cycle.
+            placed_events: set[str] = set()
 
             units = plan_execution_units(intents)
             placed = 0
@@ -917,6 +926,27 @@ class TradingBot:
                     skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "already_held_token"})
                     log.info("skip intent: copy token already held (%s…)", intent.token_id[:16])
                     continue
+                # Event-level dedup (copy intents only): don't stack onto the same
+                # real-world event via a DIFFERENT market (condition_id). Two
+                # date/threshold variants of one event (e.g. two Strait of Hormuz
+                # "returns to normal by <date>" markets) each pass the per-condition
+                # guards while concentrating risk on a single outcome. Skip if we
+                # already HOLD, or already took THIS cycle, a position on the event.
+                if intent.strategy == "copy_trade":
+                    ek = event_key(intent.question)
+                    if ek and (
+                        ek in placed_events
+                        or any(
+                            event_key(str(p.get("market") or "")) == ek
+                            and str(p.get("condition_id") or "") != str(intent.condition_id or "")
+                            and float(p.get("size") or 0) > 0
+                            and not bool(p.get("redeemable"))
+                            for p in self.state.positions
+                        )
+                    ):
+                        skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "same_event_exposure"})
+                        log.info("skip intent: same event already taken (%s…)", ek[:40])
+                        continue
                 # Time-to-resolution gate (copy intents only).
                 # Min 4h: too close to resolution for a follower to get good execution.
                 # Max copy_max_hours_to_resolution (default 720h/30d): don't tie up
@@ -1020,6 +1050,10 @@ class TradingBot:
                         )
                     ccat = str(intent.category.value).lower()
                     category_extra[ccat] = category_extra.get(ccat, 0.0) + float(intent.size_usd)
+                    if intent.strategy == "copy_trade":
+                        ek_placed = event_key(intent.question)
+                        if ek_placed:
+                            placed_events.add(ek_placed)
                     placed += 1
 
         self.state.last_skipped_intents = skipped[:30]
@@ -1265,6 +1299,12 @@ class TradingBot:
             rows = []
             with session_scope() as s:
                 for r in s.scalars(sa_select(TradeLog)).all():
+                    # Only orders that actually FILLED are real positions. Cancelled
+                    # or closed (unfilled) orders must not inflate the win/loss record
+                    # or P&L — a cancelled order whose market later resolves is NOT
+                    # our win or loss because we never held it.
+                    if (r.status or "").strip().lower() != "filled":
+                        continue
                     rows.append({
                         "condition_id": str(r.condition_id or ""),
                         "token_id": str(r.token_id or ""),
@@ -1275,7 +1315,38 @@ class TradingBot:
             return rows
 
         trades = await asyncio.to_thread(_load_trades)
-        record = await compute_resolved_record(self._http, trades, self._resolved_cache)
+
+        # Current holdings (token-ids with size>0) so that exited/sold trades do
+        # not masquerade as live "leaning" positions — keeps the record 1:1 with
+        # the wallet (a sold winner is gone from /positions even though TradeLog
+        # still has the original buy).
+        held_tokens: Optional[set] = None
+        if self.settings.wallet_address and self._http:
+            try:
+                j = await get_json_retry(
+                    self._http,
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": self.settings.wallet_address.lower(), "sizeThreshold": "0.01"},
+                )
+                if isinstance(j, list):
+                    held: set[str] = set()
+                    for pos in j:
+                        asset = pos.get("asset")
+                        if isinstance(asset, dict):
+                            tok = asset.get("token_id", "") or asset.get("tokenId", "")
+                        elif isinstance(asset, str) and len(asset) > 20:
+                            tok = asset
+                        else:
+                            tok = pos.get("tokenId", "") or pos.get("token_id", "")
+                        if tok and float(pos.get("size", 0) or 0) > 0.01:
+                            held.add(str(tok))
+                    held_tokens = held
+            except Exception as _pe:
+                log.debug("held_tokens fetch for resolved_record failed: %s", _pe)
+
+        record = await compute_resolved_record(
+            self._http, trades, self._resolved_cache, held_tokens
+        )
         self.state.resolved_record = record
 
         def _persist_cache() -> None:
