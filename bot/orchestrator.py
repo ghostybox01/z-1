@@ -25,7 +25,7 @@ from bot.agents.zscore_edge import ZScoreEdgeAgent
 from bot.copy_manager import CopyManager
 from bot.ev_math import copy_ev
 from bot.paper_portfolio import PaperPortfolio
-from bot.categories import MarketCategory
+from bot.categories import MarketCategory, classify_market
 from bot.cex import fetch_cex_bundle, infer_crypto_asset_from_text
 from bot.execution import place_limit_gtd_then_wait, place_market_fok_fallback
 from bot.gamma import scan_tradeable_markets
@@ -1322,12 +1322,17 @@ class TradingBot:
                     # our win or loss because we never held it.
                     if (r.status or "").strip().lower() != "filled":
                         continue
+                    try:
+                        _cat = classify_market({"question": r.market_question or ""}).value
+                    except Exception:
+                        _cat = "other"
                     rows.append({
                         "condition_id": str(r.condition_id or ""),
                         "token_id": str(r.token_id or ""),
                         "cost_usd": float(r.cost_usd or 0.0),
                         "price": float(r.price or 0.0),
                         "strategy": str(r.strategy or "unknown"),
+                        "category": _cat,
                     })
             return rows
 

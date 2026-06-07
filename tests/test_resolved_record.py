@@ -345,6 +345,21 @@ class TestComputeResolvedRecord(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(w["exited"], 0)
         self.assertAlmostEqual(w["unrealized_pnl"], -2.0, places=4)
 
+    async def test_by_category_grouping(self):
+        """Resolved record is also grouped by market category."""
+        cache: dict = {}
+        trades = [
+            {"condition_id": "cA", "token_id": "tA1", "cost_usd": 4.0, "price": 0.4, "strategy": "copy_trade", "category": "politics"},
+            {"condition_id": "cA2", "token_id": "tA2", "cost_usd": 5.0, "price": 0.5, "strategy": "copy_trade", "category": "politics"},
+            {"condition_id": "cB", "token_id": "tB1", "cost_usd": 2.0, "price": 0.2, "strategy": "copy_trade", "category": "sports"},
+        ]
+        result = await compute_resolved_record(self._make_http_for_trades(), trades, cache)
+        bc = result["by_category"]
+        self.assertEqual(bc["politics"]["wins"], 1)    # cA won
+        self.assertEqual(bc["politics"]["losses"], 1)  # cA2 lost
+        self.assertEqual(bc["sports"]["wins"], 1)      # cB won
+        self.assertAlmostEqual(bc["politics"]["win_rate"], 0.5)
+
 
 class TestComputeWalletOutcomes(unittest.IsolatedAsyncioTestCase):
     def _http(self):

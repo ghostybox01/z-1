@@ -155,6 +155,7 @@ async def compute_resolved_record(
 
     overall = _empty_stats()
     by_strategy: dict[str, dict] = {}
+    by_category: dict[str, dict] = {}
 
     for t in trades:
         tid = str(t.get("token_id") or "")
@@ -167,6 +168,11 @@ async def compute_resolved_record(
         if strat_key not in by_strategy:
             by_strategy[strat_key] = _empty_stats()
         sd = by_strategy[strat_key]
+        cat_key = str(t.get("category") or "unknown")
+        if cat_key not in by_category:
+            by_category[cat_key] = _empty_stats()
+        cd = by_category[cat_key]
+        targets = (overall, sd, cd)
 
         # Realized outcomes live in the permanent cache; leaning/open are this run.
         outcome = cache.get(tid)
@@ -177,13 +183,13 @@ async def compute_resolved_record(
             # REALIZED win (market closed) — counts even if already redeemed.
             shares = (cost / price) if price > 0 else 0.0
             pnl = shares * 1.0 - cost
-            for d in (overall, sd):
+            for d in targets:
                 d["wins"] += 1
                 d["realized_pnl"] += pnl
             continue
         if outcome == "lost":
             # REALIZED loss (market closed) — counts even if token discarded.
-            for d in (overall, sd):
+            for d in targets:
                 d["losses"] += 1
                 d["realized_pnl"] += -cost
             continue
@@ -192,22 +198,22 @@ async def compute_resolved_record(
         # and we no longer hold this token, the position was exited (sold or
         # redeemed) — it is NOT a current lean, so the wallet wouldn't show it.
         if held_tokens is not None and tid and tid not in held_tokens:
-            for d in (overall, sd):
+            for d in targets:
                 d["exited"] += 1
             continue
 
         if outcome == "winning":
             shares = (cost / price) if price > 0 else 0.0
             upnl = shares * 1.0 - cost
-            for d in (overall, sd):
+            for d in targets:
                 d["leaning_wins"] += 1
                 d["unrealized_pnl"] += upnl
         elif outcome == "losing":
-            for d in (overall, sd):
+            for d in targets:
                 d["leaning_losses"] += 1
                 d["unrealized_pnl"] += -cost
         else:  # "open" or None — genuinely undecided
-            for d in (overall, sd):
+            for d in targets:
                 d["pending"] += 1
 
     # Compute win rates.
@@ -220,8 +226,10 @@ async def compute_resolved_record(
     _set_win_rate(overall)
     for v in by_strategy.values():
         _set_win_rate(v)
+    for v in by_category.values():
+        _set_win_rate(v)
 
-    return {"overall": overall, "by_strategy": by_strategy}
+    return {"overall": overall, "by_strategy": by_strategy, "by_category": by_category}
 
 
 async def compute_wallet_outcomes(

@@ -572,6 +572,8 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
     <h2>Resolved Record <span id="rrBadge" class="badge" style="font-size:0.62rem;"></span></h2>
     <div class="rr-overall" id="rrOverall"></div>
     <div class="rr-strat-list" id="rrStratList"></div>
+    <div id="rrCatHdr" style="display:none;font-size:0.68rem;color:var(--muted);margin-top:6px;">By category</div>
+    <div class="rr-strat-list" id="rrCatList"></div>
   </div>
 
   <!-- Watched wallets panel -->
@@ -1001,6 +1003,7 @@ function renderResolvedRecord(d) {
   const rr = d.resolved_record || {};
   const overall = rr.overall || {};
   const byStrat = rr.by_strategy || {};
+  const byCat = rr.by_category || {};
   const wins = overall.wins || 0;
   const losses = overall.losses || 0;
   const pending = overall.pending || 0;
@@ -1064,6 +1067,37 @@ function renderResolvedRecord(d) {
         '<span class="' + spnlCls + '" style="font-family:\'IBM Plex Mono\',monospace;font-size:0.74rem;">' + escHtml(spnlStr) + '</span>' +
         '</div>';
     }).join('');
+
+  // By-category breakdown (what's winning, 1:1).
+  const catKeys = Object.keys(byCat).sort();
+  const catHdr = document.getElementById('rrCatHdr');
+  const catList = document.getElementById('rrCatList');
+  if (catList) {
+    if (!catKeys.length) {
+      catList.innerHTML = '';
+      if (catHdr) catHdr.style.display = 'none';
+    } else {
+      if (catHdr) catHdr.style.display = '';
+      catList.innerHTML = catKeys.map(k => {
+        const c = byCat[k] || {};
+        const cw = c.wins || 0, cl = c.losses || 0;
+        const ob = [];
+        if ((c.leaning_losses || 0) > 0) ob.push(c.leaning_losses + ' losing');
+        if ((c.leaning_wins || 0) > 0) ob.push(c.leaning_wins + ' winning');
+        if ((c.pending || 0) > 0) ob.push(c.pending + ' in-play');
+        const ot = ob.length ? ', ' + ob.join(', ') : '';
+        const cwr = (cw + cl) > 0 ? ((cw / (cw + cl)) * 100).toFixed(0) + '%' : '-';
+        const cpnl = c.realized_pnl != null ? c.realized_pnl : 0;
+        const cpnlCls = cpnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
+        const cpnlStr = (cpnl >= 0 ? '+$' : '-$') + Math.abs(cpnl).toFixed(2);
+        return '<div class="rr-strat-row">' +
+          '<span class="rr-strat-name">' + escHtml(k) + '</span>' +
+          '<span class="rr-strat-stat">' + escHtml(cwr) + ' (' + cw + 'W / ' + cl + 'L' + ot + ')</span>' +
+          '<span class="' + cpnlCls + '" style="font-family:\'IBM Plex Mono\',monospace;font-size:0.74rem;">' + escHtml(cpnlStr) + '</span>' +
+          '</div>';
+      }).join('');
+    }
+  }
 }
 
 function updateUI(d) {
