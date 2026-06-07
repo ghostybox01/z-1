@@ -216,6 +216,7 @@ class CopySignalAgent:
                         reason=f"wallet={wallet[:10]}… px~{c.price:.3f}",
                         reference_price=c.price,
                         source_wallet=wallet,
+                        event_slug=c.event_slug,
                     )
                 )
 

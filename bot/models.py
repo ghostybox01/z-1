@@ -33,6 +33,9 @@ class TradeIntent:
     hours_to_resolution: Optional[float] = None
     # Copy-trade: source wallet whose trade we're following (for the EV-at-our-entry gate).
     source_wallet: str = ""
+    # Copy-trade: Polymarket event slug grouping candidate markets of one event
+    # (e.g. all candidates in an election) — for event-level dedup.
+    event_slug: str = ""
 
 
 @dataclass

@@ -383,6 +383,7 @@ class TradingBot:
                 {
                     "token_id": token_id,
                     "condition_id": cid_pos,
+                    "event_slug": str(pos.get("eventSlug") or ""),
                     "market": market_name or token_id[:16],
                     "outcome": outcome,
                     "side": pos.get("side", "BUY"),
@@ -817,6 +818,7 @@ class TradingBot:
             # so a second market (different condition_id) on the same event is skipped
             # before positions refresh next cycle.
             placed_events: set[str] = set()
+            placed_event_slugs: set[str] = set()
 
             units = plan_execution_units(intents)
             placed = 0
@@ -934,16 +936,27 @@ class TradingBot:
                 # already HOLD, or already took THIS cycle, a position on the event.
                 if intent.strategy == "copy_trade":
                     ek = event_key(intent.question)
-                    if ek and (
-                        ek in placed_events
-                        or any(
-                            event_key(str(p.get("market") or "")) == ek
-                            and str(p.get("condition_id") or "") != str(intent.condition_id or "")
+                    es = str(getattr(intent, "event_slug", "") or "")
+                    icid = str(intent.condition_id or "")
+
+                    def _open_other(p):
+                        return (
+                            str(p.get("condition_id") or "") != icid
                             and float(p.get("size") or 0) > 0
                             and not bool(p.get("redeemable"))
-                            for p in self.state.positions
                         )
-                    ):
+                    # Primary: Polymarket event slug (catches multi-candidate, e.g. two
+                    # candidates of one election sharing an eventSlug). Fallback:
+                    # normalized question (date/threshold variants of one event).
+                    same_event = bool(
+                        (es and (es in placed_event_slugs
+                                 or any(_open_other(p) and str(p.get("event_slug") or "") == es
+                                        for p in self.state.positions)))
+                        or (ek and (ek in placed_events
+                                    or any(_open_other(p) and event_key(str(p.get("market") or "")) == ek
+                                           for p in self.state.positions)))
+                    )
+                    if same_event:
                         skipped.append({"agent": intent.agent, "strategy": intent.strategy, "question": intent.question[:80], "reason": "same_event_exposure"})
                         log.info("skip intent: same event already taken (%s…)", ek[:40])
                         continue
@@ -1054,6 +1067,9 @@ class TradingBot:
                         ek_placed = event_key(intent.question)
                         if ek_placed:
                             placed_events.add(ek_placed)
+                        es_placed = str(getattr(intent, "event_slug", "") or "")
+                        if es_placed:
+                            placed_event_slugs.add(es_placed)
                     placed += 1
 
         self.state.last_skipped_intents = skipped[:30]

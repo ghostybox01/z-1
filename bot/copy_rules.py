@@ -53,6 +53,7 @@ class CopyCandidate:
     outcome: str
     price: float
     usdc: float
+    event_slug: str = ""
 
 
 def extract_token_id(entry: dict[str, Any]) -> str | None:
@@ -109,6 +110,7 @@ def build_candidate(entry: dict[str, Any], wallet: str, default_bet_usd: float) 
     outc = str(entry.get("outcome") or "unknown").strip().lower()
     txh = str(entry.get("transactionHash") or entry.get("id") or "")
     tx_key = f"{wallet}:{txh}:{tid}"
+    event_slug = str(entry.get("eventSlug") or "")
     return CopyCandidate(
         wallet=str(wallet).lower().strip(),
         token_id=tid,
@@ -120,6 +122,7 @@ def build_candidate(entry: dict[str, Any], wallet: str, default_bet_usd: float) 
         outcome=outc,
         price=px,
         usdc=usdc,
+        event_slug=event_slug,
     )
 
 
