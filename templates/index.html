@@ -574,6 +574,12 @@ code { font-family: 'IBM Plex Mono', monospace; font-size: 0.68rem; background: 
     <div class="rr-strat-list" id="rrStratList"></div>
   </div>
 
+  <!-- Watched wallets panel -->
+  <div id="walletPanel" class="section rr-panel" style="display:none;">
+    <h2>Watched Wallets <span id="wpBadge" class="badge" style="font-size:0.62rem;"></span></h2>
+    <div class="rr-strat-list" id="wpList"></div>
+  </div>
+
   <!-- Real vs Paper scoreboard -->
   <div id="scoreboardPanel" style="display:none;margin-bottom:20px;">
     <div class="split-row">
@@ -1345,6 +1351,45 @@ setInterval(function() {
 
 fetchState();
 setInterval(fetchState, 5000);
+
+// Watched-wallets panel: vetted record + OUR realized record per wallet.
+async function renderWallets() {
+  const panel = document.getElementById('walletPanel');
+  if (!panel) return;
+  let data;
+  try {
+    const r = await fetch('/api/admin/copy-manager', { credentials: 'include' });
+    if (!r.ok) { panel.style.display = 'none'; return; }
+    data = await r.json();
+  } catch (e) { return; }
+  const ws = (data && data.wallets) || [];
+  if (!ws.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const active = ws.filter(function (w) { return w.status === 'active' || w.status === 'manual'; });
+  document.getElementById('wpBadge').textContent = active.length + ' active / ' + ws.length + ' tracked';
+  document.getElementById('wpList').innerHTML = ws.slice(0, 40).map(function (w) {
+    const vet = (w.win_rate != null) ? (w.win_rate * 100).toFixed(0) + '%' : '-';
+    const ourN = (w.our_wins || 0) + (w.our_losses || 0);
+    const ourPnl = (w.our_pnl != null) ? w.our_pnl : 0;
+    const pnlCls = ourPnl >= 0 ? 'rr-pnl-pos' : 'rr-pnl-neg';
+    let ourStr;
+    if (ourN > 0) {
+      const ourWr = (w.our_win_rate != null) ? (w.our_win_rate * 100).toFixed(0) + '%' : '-';
+      ourStr = ourWr + ' (' + (w.our_wins || 0) + 'W/' + (w.our_losses || 0) + 'L) ' +
+        '<span class="' + pnlCls + '">' + (ourPnl >= 0 ? '+$' : '-$') + Math.abs(ourPnl).toFixed(2) + '</span>';
+    } else { ourStr = 'no copies yet'; }
+    const stColor = w.status === 'active' ? '#3fb950' : (w.status === 'manual' ? 'var(--muted)' : 'var(--danger)');
+    const label = (w.user_name && w.user_name.length) ? w.user_name : (w.wallet || '');
+    return '<div class="rr-strat-row">' +
+      '<span class="rr-strat-name" title="' + escHtml(w.wallet || '') + '">' + escHtml(String(label).slice(0, 16)) +
+        ' <span style="color:' + stColor + ';font-size:0.62rem;">' + escHtml(w.status || '') + '</span></span>' +
+      '<span class="rr-strat-stat">vetted ' + escHtml(vet) + ' | ours ' + ourStr + '</span>' +
+      '<span style="color:var(--muted);font-size:0.7rem;">' + escHtml(w.source_category || '') + '</span>' +
+      '</div>';
+  }).join('');
+}
+renderWallets();
+setInterval(renderWallets, 30000);
 </script>
 </body>
 </html>

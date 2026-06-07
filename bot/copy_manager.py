@@ -36,6 +36,11 @@ _DEFAULT_REFRESH_INTERVAL = 6 * 3600
 # a wallet whose performance has just cratered.
 _CACHE_TTL_SECONDS = 600.0
 
+# OUR-outcome scoring: bench an active wallet whose copies lose for US (distinct
+# from the wallet's own vetted record). Conservative — needs a real sample first.
+_OUR_MIN_SAMPLE = 5
+_OUR_WINRATE_FLOOR = 0.40
+
 
 @dataclass
 class WalletStats:
@@ -56,6 +61,11 @@ class WalletStats:
     status: str = "active"  # active | probation | pruned | manual
     account_age_days: float = 0.0
     profit_factor: float = 0.0
+    # OUR realized record from copying this wallet (vs the vetted record above).
+    our_wins: int = 0
+    our_losses: int = 0
+    our_win_rate: float | None = None
+    our_pnl: float = 0.0
 
 
 @dataclass
@@ -76,6 +86,7 @@ class CopyManager:
         self.settings = settings
         self.state = CopyManagerState()
         self._http: httpx.AsyncClient | None = None
+        self._our_resolve_cache: dict[str, str] = {}  # token_id -> won|lost (our-outcome scoring)
         self._seed_manual_wallets()
 
     def _seed_manual_wallets(self) -> None:
@@ -154,6 +165,9 @@ class CopyManager:
             new_count = await self._discover_and_add(http)
             result["added"] = new_count
 
+            # 1b. Score wallets by OUR realized outcomes; bench those that lose for us.
+            await self._update_our_outcomes(http)
+
             # 2. Re-check existing wallets and prune underperformers
             prune_count = await self._check_and_prune(http)
             result["pruned"] = prune_count
@@ -181,6 +195,63 @@ class CopyManager:
             result["error"] = str(e)
 
         return result
+
+    async def _update_our_outcomes(self, http: httpx.AsyncClient) -> None:
+        """Compute OUR realized record per source wallet and bench wallets whose
+        copies lose for us. No-op until copies tagged with source_wallet resolve.
+        """
+        from bot.db.models import TradeLog, session_scope
+        from bot.resolved_record import compute_wallet_outcomes
+        from sqlalchemy import select as _sel
+
+        trades: list[dict] = []
+        try:
+            with session_scope() as s:
+                for r in s.execute(_sel(TradeLog)).scalars().all():
+                    if "filled" not in str(r.status or "").lower():
+                        continue
+                    w = str(getattr(r, "source_wallet", "") or "").strip()
+                    if not w:
+                        continue
+                    trades.append({
+                        "source_wallet": w,
+                        "condition_id": str(r.condition_id or ""),
+                        "token_id": str(r.token_id or ""),
+                        "cost_usd": float(r.cost_usd or 0.0),
+                        "price": float(r.price or 0.0),
+                    })
+        except Exception as e:
+            log.warning("our-outcome load failed: %s", e)
+            return
+        if not trades:
+            return
+        try:
+            outcomes = await compute_wallet_outcomes(http, trades, self._our_resolve_cache)
+        except Exception as e:
+            log.warning("our-outcome scoring failed: %s", e)
+            return
+        for w, st in self.state.wallet_stats.items():
+            rec = outcomes.get(w.lower())
+            if not rec:
+                continue
+            st.our_wins = rec["wins"]
+            st.our_losses = rec["losses"]
+            st.our_win_rate = rec["win_rate"]
+            st.our_pnl = rec["realized_pnl"]
+            resolved = rec["wins"] + rec["losses"]
+            if (
+                st.status == "active"
+                and resolved >= _OUR_MIN_SAMPLE
+                and rec["win_rate"] is not None
+                and rec["win_rate"] < _OUR_WINRATE_FLOOR
+            ):
+                st.status = "pruned"
+                self.state.total_pruned += 1
+                log.warning(
+                    "CopyManager: BENCHED %s… — OUR copies %dW/%dL (%.0f%%) < %.0f%% floor",
+                    w[:12], rec["wins"], rec["losses"],
+                    (rec["win_rate"] or 0.0) * 100, _OUR_WINRATE_FLOOR * 100,
+                )
 
     async def _discover_and_add(self, http: httpx.AsyncClient) -> int:
         """Discover qualified wallets from all leaderboard categories."""
@@ -444,6 +515,11 @@ class CopyManager:
         st = self.state.wallet_stats.get(w)
         if st is None:
             return None
+        # Prefer OUR realized win rate once we have a real sample — it reflects
+        # actual copy outcomes (after our latency/buffer/cost), more predictive
+        # for the EV gate than the wallet's own vetted record.
+        if (st.our_wins + st.our_losses) >= _OUR_MIN_SAMPLE and st.our_win_rate and st.our_win_rate > 0.0:
+            return float(st.our_win_rate)
         if int(st.wins + st.losses) <= 0:
             return None
         wr = st.win_rate
@@ -467,6 +543,10 @@ class CopyManager:
                 "total_pnl": st.total_pnl,
                 "account_age_days": st.account_age_days,
                 "profit_factor": st.profit_factor,
+                "our_wins": st.our_wins,
+                "our_losses": st.our_losses,
+                "our_win_rate": st.our_win_rate,
+                "our_pnl": st.our_pnl,
                 "source_category": st.source_category,
                 "user_name": st.user_name,
                 "leaderboard_pnl": st.leaderboard_pnl,

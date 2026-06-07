@@ -47,6 +47,7 @@ class TradeLog(Base):
     strategy: Mapped[str] = mapped_column(Text)
     outcome: Mapped[str] = mapped_column(String(128))
     reconcile_note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_wallet: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
 

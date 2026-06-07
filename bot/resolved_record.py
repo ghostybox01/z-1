@@ -222,3 +222,61 @@ async def compute_resolved_record(
         _set_win_rate(v)
 
     return {"overall": overall, "by_strategy": by_strategy}
+
+
+async def compute_wallet_outcomes(
+    http: Any,
+    trades: list[dict],
+    cache: dict[str, str],
+) -> dict:
+    """OUR realized record per source wallet (did copying THEM win for US?).
+
+    Distinct from a wallet's own vetted win-rate: this is the realized outcome of
+    the copies we actually placed following each wallet, after our latency, buffer
+    and cost.  Only REALIZED (closed) outcomes count toward win_rate.
+
+    Parameters
+    ----------
+    trades: dicts with ``source_wallet``, ``condition_id``, ``token_id``,
+        ``cost_usd``, ``price``.
+    cache: persistent ``{token_id: "won"|"lost"}`` (shared with the main tracker).
+
+    Returns ``{wallet_lower: {wins, losses, pending, realized_pnl, win_rate}}``.
+    """
+    unresolved: dict[str, str] = {}
+    for t in trades:
+        tid = str(t.get("token_id") or "")
+        cid = str(t.get("condition_id") or "")
+        if tid and cid and tid not in cache:
+            unresolved[tid] = cid
+    for tid, cid in unresolved.items():
+        outcome = await resolve_token(http, cid, tid)
+        if outcome in ("won", "lost"):
+            cache[tid] = outcome
+
+    out: dict[str, dict] = {}
+    for t in trades:
+        w = str(t.get("source_wallet") or "").strip().lower()
+        if not w:
+            continue
+        tid = str(t.get("token_id") or "")
+        cost = float(t.get("cost_usd") or 0.0)
+        price = float(t.get("price") or 0.0)
+        d = out.setdefault(
+            w, {"wins": 0, "losses": 0, "pending": 0, "realized_pnl": 0.0, "win_rate": None}
+        )
+        outcome = cache.get(tid)
+        if outcome == "won":
+            shares = (cost / price) if price > 0 else 0.0
+            d["wins"] += 1
+            d["realized_pnl"] += shares * 1.0 - cost
+        elif outcome == "lost":
+            d["losses"] += 1
+            d["realized_pnl"] += -cost
+        else:
+            d["pending"] += 1
+    for d in out.values():
+        resolved = d["wins"] + d["losses"]
+        d["win_rate"] = (d["wins"] / resolved) if resolved > 0 else None
+        d["realized_pnl"] = round(d["realized_pnl"], 4)
+    return out

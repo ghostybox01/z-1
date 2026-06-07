@@ -6,7 +6,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from bot.resolved_record import compute_resolved_record, resolve_token
+from bot.resolved_record import compute_resolved_record, compute_wallet_outcomes, resolve_token
 
 
 def _mock_http(status: int = 200, body: dict | None = None):
@@ -344,6 +344,48 @@ class TestComputeResolvedRecord(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(w["leaning_losses"], 1)
         self.assertEqual(w["exited"], 0)
         self.assertAlmostEqual(w["unrealized_pnl"], -2.0, places=4)
+
+
+class TestComputeWalletOutcomes(unittest.IsolatedAsyncioTestCase):
+    def _http(self):
+        async def _get(url, **kw):
+            resp = MagicMock()
+            resp.status_code = 200
+            if "cWIN" in url:
+                resp.json.return_value = {"closed": True, "tokens": [{"token_id": "tWIN", "price": 1.0}]}
+            elif "cLOSE" in url:
+                resp.json.return_value = {"closed": True, "tokens": [{"token_id": "tLOSE", "price": 0.0}]}
+            else:
+                resp.json.return_value = {"closed": False, "tokens": [{"token_id": "tOPEN", "price": 0.5}]}
+            return resp
+        http = MagicMock()
+        http.get = _get
+        return http
+
+    async def test_per_wallet_record(self):
+        cache: dict = {}
+        trades = [
+            {"source_wallet": "0xAAA", "condition_id": "cWIN", "token_id": "tWIN", "cost_usd": 4.0, "price": 0.4},
+            {"source_wallet": "0xAAA", "condition_id": "cLOSE", "token_id": "tLOSE", "cost_usd": 5.0, "price": 0.5},
+            {"source_wallet": "0xBBB", "condition_id": "cWIN", "token_id": "tWIN", "cost_usd": 2.0, "price": 0.5},
+            {"source_wallet": "0xBBB", "condition_id": "cOPEN", "token_id": "tOPEN", "cost_usd": 2.0, "price": 0.5},
+        ]
+        out = await compute_wallet_outcomes(self._http(), trades, cache)
+        self.assertEqual(out["0xaaa"]["wins"], 1)        # lowercased key
+        self.assertEqual(out["0xaaa"]["losses"], 1)
+        self.assertAlmostEqual(out["0xaaa"]["win_rate"], 0.5)
+        self.assertAlmostEqual(out["0xaaa"]["realized_pnl"], 6.0 - 5.0, places=4)  # win +6, loss -5
+        self.assertEqual(out["0xbbb"]["wins"], 1)
+        self.assertEqual(out["0xbbb"]["pending"], 1)
+        self.assertEqual(out["0xbbb"]["win_rate"], 1.0)
+
+    async def test_empty_wallet_skipped(self):
+        out = await compute_wallet_outcomes(
+            self._http(),
+            [{"source_wallet": "", "condition_id": "cWIN", "token_id": "tWIN", "cost_usd": 1.0, "price": 0.5}],
+            {},
+        )
+        self.assertEqual(out, {})
 
 
 if __name__ == "__main__":

@@ -1266,6 +1266,7 @@ class TradingBot:
                 status=status,
                 strategy=rec.strategy,
                 outcome=intent.outcome,
+                source_wallet=getattr(intent, "source_wallet", ""),
                 reconcile_note=rec.reconcile_note,
             )
             if status.startswith("dry_run"):

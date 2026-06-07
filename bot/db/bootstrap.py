@@ -32,6 +32,17 @@ def init_database(database_url: str | None = None) -> dict[str, Any]:
     url = database_url or str(cfg.get("database_url") or "sqlite:///./data/app.db")
     eng = configure_engine(url)
     Base.metadata.create_all(eng)
+    # Lightweight migration: create_all() does NOT add new columns to existing
+    # tables. Add columns the ORM models expect but an older DB may lack.
+    try:
+        from sqlalchemy import text as _text
+        with eng.begin() as _conn:
+            _cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(trade_logs)"))]
+            if "source_wallet" not in _cols:
+                _conn.execute(_text("ALTER TABLE trade_logs ADD COLUMN source_wallet VARCHAR(128) DEFAULT ''"))
+                log.info("migration: added trade_logs.source_wallet")
+    except Exception as _exc:
+        log.warning("source_wallet migration skipped: %s", _exc)
 
     with session_scope() as s:
         seed = default_kv_seed()

@@ -51,6 +51,7 @@ def append_trade_log(
     status: str,
     strategy: str,
     outcome: str,
+    source_wallet: str = "",
     reconcile_note: str | None = None,
 ) -> None:
     with session_scope() as s:
@@ -67,6 +68,7 @@ def append_trade_log(
                 status=status,
                 strategy=strategy,
                 outcome=outcome,
+                source_wallet=source_wallet,
                 reconcile_note=reconcile_note,
             )
         )
