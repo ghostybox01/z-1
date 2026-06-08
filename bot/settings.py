@@ -84,11 +84,7 @@ def default_kv_seed() -> dict[str, str]:
         "reconcile_history_depth": "15",
         "reconcile_poll_sleep_s": "0.06",
         "open_orders_display_limit": "40",
-        "agent_value": "false",
         "agent_copy": "false",
-        "agent_latency": "false",
-        "agent_bundle": "false",
-        "agent_zscore": "false",
         "agent_weather": "false",
         "weather_min_edge": "0.12",
         "weather_sigma": "1.6",
@@ -97,12 +93,6 @@ def default_kv_seed() -> dict[str, str]:
         "weather_discovery_enabled": "true",
         "weather_discovery_min_trades": "100",
         "weather_discovery_min_win_rate": "0.80",
-        "latency_min_dislocation_bps": "120",
-        "bundle_max_pair_cost": "0.994",
-        "bundle_min_liquidity_usd": "1500",
-        "zscore_window": "24",
-        "zscore_entry_abs": "2.2",
-        "zscore_min_samples": "12",
         "copy_watch_wallets": "[]",
         "copy_poll_seconds": "15",
         "copy_min_usd": "0",
@@ -231,11 +221,7 @@ class Settings:
     reconcile_poll_sleep_s: float = 0.06
     open_orders_display_limit: int = 40
 
-    agent_value: bool = False
     agent_copy: bool = False
-    agent_latency: bool = False
-    agent_bundle: bool = False
-    agent_zscore: bool = False
     agent_weather: bool = False
     weather_min_edge: float = 0.12
     weather_sigma: float = 1.6
@@ -244,12 +230,6 @@ class Settings:
     weather_discovery_enabled: bool = True
     weather_discovery_min_trades: float = 100.0
     weather_discovery_min_win_rate: float = 0.80
-    latency_min_dislocation_bps: float = 120.0
-    bundle_max_pair_cost: float = 0.994
-    bundle_min_liquidity_usd: float = 1500.0
-    zscore_window: int = 24
-    zscore_entry_abs: float = 2.2
-    zscore_min_samples: int = 12
     copy_watch_wallets: list[str] = field(default_factory=list)
     copy_poll_seconds: int = 15
     copy_min_usd: float = 0.0
@@ -474,11 +454,7 @@ class Settings:
             reconcile_history_depth=_i(g("reconcile_history_depth", "15"), 15),
             reconcile_poll_sleep_s=_f(g("reconcile_poll_sleep_s", "0.06"), 0.06),
             open_orders_display_limit=_i(g("open_orders_display_limit", "40"), 40),
-            agent_value=_b(g("agent_value", "true"), True),
             agent_copy=_b(g("agent_copy", "false"), False),
-            agent_latency=_b(g("agent_latency", "false"), False),
-            agent_bundle=_b(g("agent_bundle", "false"), False),
-            agent_zscore=_b(g("agent_zscore", "false"), False),
             agent_weather=_b(g("agent_weather", "false"), False),
             weather_min_edge=_f(g("weather_min_edge", "0.12"), 0.12),
             weather_sigma=_f(g("weather_sigma", "1.6"), 1.6),
@@ -487,12 +463,6 @@ class Settings:
             weather_discovery_enabled=_b(g("weather_discovery_enabled", "true"), True),
             weather_discovery_min_trades=_f(g("weather_discovery_min_trades", "100"), 100.0),
             weather_discovery_min_win_rate=_f(g("weather_discovery_min_win_rate", "0.80"), 0.80),
-            latency_min_dislocation_bps=_f(g("latency_min_dislocation_bps", "120"), 120.0),
-            bundle_max_pair_cost=_f(g("bundle_max_pair_cost", "0.994"), 0.994),
-            bundle_min_liquidity_usd=_f(g("bundle_min_liquidity_usd", "1500"), 1500.0),
-            zscore_window=_i(g("zscore_window", "24"), 24),
-            zscore_entry_abs=_f(g("zscore_entry_abs", "2.2"), 2.2),
-            zscore_min_samples=_i(g("zscore_min_samples", "12"), 12),
             copy_watch_wallets=wallets,
             copy_poll_seconds=_i(g("copy_poll_seconds", "15"), 15),
             copy_min_usd=_f(g("copy_min_usd", "0"), 0.0),
@@ -607,15 +577,7 @@ class Settings:
             "host": self.host,
             "port": self.port,
             "strict_execution": self.strict_execution,
-            "agent_value": self.agent_value,
             "agent_copy": self.agent_copy,
-            "agent_latency": self.agent_latency,
-            "agent_bundle": self.agent_bundle,
-            "agent_zscore": self.agent_zscore,
-            "latency_min_dislocation_bps": self.latency_min_dislocation_bps,
-            "bundle_max_pair_cost": self.bundle_max_pair_cost,
-            "zscore_window": self.zscore_window,
-            "zscore_entry_abs": self.zscore_entry_abs,
             "copy_wallets_n": len(self.copy_watch_wallets),
             "copy_min_usd": self.copy_min_usd,
             "copy_max_usd": self.copy_max_usd,

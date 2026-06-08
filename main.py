@@ -57,12 +57,9 @@ async def run(ui_mode_override: str | None = None):
     logger.info("  UI_MODE:   %s", s.ui_mode)
     logger.info("  Trade:     %s", "DRY RUN" if s.dry_run else "LIVE")
     logger.info(
-        "  Agents:    value=%s  copy=%s  latency=%s  bundle=%s  zscore=%s",
-        s.agent_value,
+        "  Agents:    copy=%s  weather=%s",
         s.agent_copy,
-        s.agent_latency,
-        s.agent_bundle,
-        s.agent_zscore,
+        s.agent_weather,
     )
     if s.ui_mode in ("dashboard", "both"):
         logger.info("  Web UI:    http://%s:%s", s.host, s.port)

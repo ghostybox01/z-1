@@ -15,13 +15,9 @@ from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 from bot.clob_client import apply_clob_proxy, build_clob_client
 
-from bot.agents.bundle_arb import BundleArbAgent
 from bot.agents.copy_signal import CopySignalAgent
-from bot.agents.latency_arb import LatencyArbAgent
 from bot.agents.registry import agents_status
-from bot.agents.value_edge import ValueEdgeAgent
 from bot.agents.weather_arb import WeatherArbAgent
-from bot.agents.zscore_edge import ZScoreEdgeAgent
 from bot.copy_manager import CopyManager
 from bot.ev_math import copy_ev
 from bot.paper_portfolio import PaperPortfolio
@@ -70,11 +66,7 @@ class TradingBot:
         self._market_cache: dict[str, dict] = {}
         self._http: Optional[httpx.AsyncClient] = None
 
-        self._value_agent = ValueEdgeAgent(self.settings)
         self._copy_agent = CopySignalAgent(self.settings)
-        self._latency_agent = LatencyArbAgent(self.settings)
-        self._bundle_agent = BundleArbAgent(self.settings)
-        self._zscore_agent = ZScoreEdgeAgent(self.settings)
         self._weather_agent = WeatherArbAgent(self.settings)
         self._copy_manager = CopyManager(self.settings)
         self._paper_portfolio = PaperPortfolio()
@@ -97,13 +89,10 @@ class TradingBot:
 
         w = self.settings.wallet_address
         log.info(
-            "TradingBot init mode=%s value=%s copy=%s lat=%s bundle=%s z=%s wallet=%s…",
+            "TradingBot init mode=%s copy=%s weather=%s wallet=%s…",
             self.state.mode,
-            self.settings.agent_value,
             self.settings.agent_copy,
-            self.settings.agent_latency,
-            self.settings.agent_bundle,
-            self.settings.agent_zscore,
+            self.settings.agent_weather,
             (w[:12] + "…") if w else "(none)",
         )
 
@@ -118,11 +107,7 @@ class TradingBot:
             return
         self.settings = new_settings
         self.state.mode = "dry_run" if self.settings.dry_run else "live"
-        self._value_agent.settings = self.settings
         self._copy_agent.settings = self.settings
-        self._latency_agent.settings = self.settings
-        self._bundle_agent.settings = self.settings
-        self._zscore_agent.settings = self.settings
         self._weather_agent.settings = self.settings
         self._copy_manager.sync_settings(self.settings)
 
@@ -319,15 +304,8 @@ class TradingBot:
             log.warning("positions API: %s", e)
             return
 
-        # Market-name fallback only — and only worth a full scan if a scanning agent
-        # is active. In copy-only mode we rely on the /positions title instead, so the
-        # name lookup never triggers the slow scan.
-        if not self._market_cache and self.clob and (
-            self.settings.agent_value or self.settings.agent_latency
-            or self.settings.agent_bundle or self.settings.agent_zscore
-        ):
-            await self._gamma_scan()
-
+        # Copy + weather rely on the /positions title and their own data streams, so
+        # there is no scanning agent left that needs the slow ~1.5k-market Gamma scan.
         our_tokens = {str(t.token_id) for t in self.state.trade_history if getattr(t, "token_id", "")}
         summ = {"active": 0, "won": 0, "lost": 0, "realized_pnl": 0.0}
         counted: set[str] = set()
@@ -674,30 +652,12 @@ class TradingBot:
             log.warning("Balance below min bet + buffer")
             return
 
-        # Only the market-scanning agents (value/latency/bundle/zscore) consume the
-        # ~1.5k-market Gamma scan; copy-trading uses the /activity stream instead.
-        # Skip the scan when none of those agents are active so the copy cycle stays
-        # fast (seconds, not minutes) and the disabled agents can't slow it down.
-        need_scan = bool(self.clob) and (
-            self.settings.agent_value or self.settings.agent_latency
-            or self.settings.agent_bundle or self.settings.agent_zscore
-        )
-        markets = await self._gamma_scan() if need_scan else []
+        # Copy-trading uses the /activity stream and weather uses Open-Meteo; neither
+        # consumes the ~1.5k-market Gamma scan, so the copy cycle stays fast (seconds,
+        # not minutes).
         pos_tokens = {p["token_id"] for p in self.state.positions}
 
         agent_tasks: list[tuple[str, asyncio.Task]] = []
-        if self.settings.agent_value and self.clob:
-            agent_tasks.append(("value_edge", asyncio.ensure_future(
-                self._value_agent.propose(self.clob, markets, pos_tokens, self._rate_limit))))
-        if self.settings.agent_latency and self.clob:
-            agent_tasks.append(("latency_arb", asyncio.ensure_future(
-                self._latency_agent.propose(self.clob, markets, pos_tokens, self._rate_limit))))
-        if self.settings.agent_bundle and self.clob:
-            agent_tasks.append(("bundle_arb", asyncio.ensure_future(
-                self._bundle_agent.propose(self.clob, markets, pos_tokens, self._rate_limit))))
-        if self.settings.agent_zscore and self.clob:
-            agent_tasks.append(("zscore_edge", asyncio.ensure_future(
-                self._zscore_agent.propose(self.clob, markets, pos_tokens, self._rate_limit))))
         copy_scheduled = bool(self.settings.agent_copy and self.settings.copy_watch_wallets)
         if copy_scheduled:
             agent_tasks.append(("copy_signal", asyncio.ensure_future(
@@ -712,15 +672,8 @@ class TradingBot:
 
         runtime: dict[str, dict[str, Any]] = {}
         scheduled_ids = {aid for aid, _ in agent_tasks}
-        for aid in ("value_edge", "latency_arb", "bundle_arb", "zscore_edge", "copy_signal", "weather_arb"):
+        for aid in ("copy_signal", "weather_arb"):
             runtime[aid] = {"scheduled": aid in scheduled_ids, "ran": False, "intents": 0, "note": ""}
-
-        if not self.clob:
-            for aid in ("value_edge", "latency_arb", "bundle_arb", "zscore_edge"):
-                flag = {"value_edge": "agent_value", "latency_arb": "agent_latency",
-                        "bundle_arb": "agent_bundle", "zscore_edge": "agent_zscore"}.get(aid, "")
-                if getattr(self.settings, flag, False) and aid not in scheduled_ids:
-                    runtime[aid]["note"] = "enabled but skipped — no CLOB keys (set polymarket_private_key in Admin)"
 
         for (aid, _task), r in zip(agent_tasks, results):
             if isinstance(r, Exception):
@@ -1406,15 +1359,11 @@ class TradingBot:
             except Exception as e:
                 log.exception("cycle")
                 self.state.errors.append(f"cycle: {e}")
-            # Pace the loop to the fastest active agent. Copy-trading reacts to the
-            # /activity stream and wants a short poll; the market-scanning agents only
-            # need the slower scan interval. In copy-only mode this makes copy react in
-            # ~seconds instead of waiting a full scan interval (the scan is skipped too).
-            need_scan = (
-                self.settings.agent_value or self.settings.agent_latency
-                or self.settings.agent_bundle or self.settings.agent_zscore
-            )
-            if self.settings.agent_copy and not need_scan:
+            # Pace the loop to the active agent. Copy-trading reacts to the /activity
+            # stream and wants a short poll; otherwise fall back to the slower scan
+            # interval. This makes copy react in ~seconds instead of waiting a full
+            # scan interval.
+            if self.settings.agent_copy:
                 sleep_s = float(self.settings.copy_poll_seconds or 15.0)
             else:
                 sleep_s = float(self.settings.scan_interval_seconds or 120.0)

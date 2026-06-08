@@ -21,7 +21,7 @@ def _make_intent(**overrides) -> TradeIntent:
         max_price=0.55,
         size_usd=10.0,
         category=MarketCategory.SPORTS,
-        strategy="value_edge",
+        strategy="copy_signal",
         reason="test",
     )
     defaults.update(overrides)

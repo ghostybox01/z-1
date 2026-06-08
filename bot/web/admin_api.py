@@ -268,43 +268,20 @@ def _settings_field_groups() -> list[dict]:
             "description": "Enable or disable individual trading strategy agents.",
             "level": "basic",
             "fields": [
-                {"key": "agent_value", "label": "Value Edge Agent", "type": "bool", "help": "Finds mispriced YES/NO markets by comparing outcome prices to fair-value thresholds."},
                 {"key": "agent_copy", "label": "Copy Signal Agent", "type": "bool", "help": "Mirrors trades from watched wallets. Requires wallet addresses to be configured."},
-                {"key": "agent_latency", "label": "Latency Arb Agent", "type": "bool", "help": "Detects stale prices that lag behind CEX reference data."},
-                {"key": "agent_bundle", "label": "Bundle Arb Agent", "type": "bool", "help": "Buys both YES and NO when their combined cost < $1 (arbitrage opportunity)."},
-                {"key": "agent_zscore", "label": "Z-Score Agent", "type": "bool", "help": "Trades statistical outliers based on price z-score over a rolling window."},
+                {"key": "agent_weather", "label": "Weather Arb Agent", "type": "bool", "help": "Compares Open-Meteo forecasts against temperature markets. Paper-test only."},
             ],
         },
         {
-            "id": "value_edge",
-            "title": "Value Edge Parameters",
-            "description": "Thresholds for the value-edge agent's buy decisions.",
+            "id": "sizing",
+            "title": "Sizing & Signals",
+            "description": "Research-signal and PnL-aware sizing controls.",
             "level": "advanced",
             "fields": [
-                {"key": "strategy_profile", "label": "Strategy Profile", "type": "text", "help": "Preset parameter profile: 'balanced', 'aggressive', or 'conservative'."},
-                {"key": "value_yes_low", "label": "YES Buy Low", "type": "float", "help": "Minimum YES price to consider buying (e.g. 0.20 = 20 cents)."},
-                {"key": "value_yes_high", "label": "YES Buy High", "type": "float", "help": "Maximum YES price to consider buying."},
-                {"key": "value_no_yes_min", "label": "NO Trigger: YES Must Be Above", "type": "float", "help": "For BUY NO, the YES price must be at least this high."},
-                {"key": "value_no_no_max", "label": "NO Max Price", "type": "float", "help": "Maximum NO price to buy at."},
-                {"key": "value_liq_floor_usd", "label": "Liquidity Floor (USD)", "type": "float", "help": "Minimum liquidity in the order book to consider trading."},
                 {"key": "min_edge_bps", "label": "Minimum Edge (bps)", "type": "int", "help": "Minimum price edge in basis points between reference and limit price. 0 = disabled."},
                 {"key": "signals_enabled", "label": "Research Signals", "type": "bool", "help": "Use uploaded research signals to bias trade sizing."},
                 {"key": "pnl_sizing_enabled", "label": "PnL-Aware Sizing", "type": "bool", "help": "Adjust bet sizes based on recent trading performance."},
                 {"key": "pnl_sizing_window", "label": "PnL Sizing Window (days)", "type": "int", "help": "Lookback window for PnL-aware sizing."},
-            ],
-        },
-        {
-            "id": "latency_bundle_zscore",
-            "title": "Latency / Bundle / Z-Score Parameters",
-            "description": "Agent-specific tuning for latency arb, bundle arb, and z-score agents.",
-            "level": "advanced",
-            "fields": [
-                {"key": "latency_min_dislocation_bps", "label": "Latency Min Dislocation (bps)", "type": "float", "help": "Minimum CEX-vs-Poly dislocation in basis points to trigger a latency arb trade."},
-                {"key": "bundle_max_pair_cost", "label": "Bundle Max Pair Cost", "type": "float", "help": "Maximum combined cost of YES+NO pair (< $1.00 means profit). E.g. 0.994."},
-                {"key": "bundle_min_liquidity_usd", "label": "Bundle Min Liquidity (USD)", "type": "float", "help": "Minimum liquidity required for bundle arb trades."},
-                {"key": "zscore_window", "label": "Z-Score Window (hours)", "type": "int", "help": "Rolling window for z-score calculation."},
-                {"key": "zscore_entry_abs", "label": "Z-Score Entry Threshold", "type": "float", "help": "Absolute z-score value required to trigger an entry. Higher = fewer trades."},
-                {"key": "zscore_min_samples", "label": "Z-Score Min Samples", "type": "int", "help": "Minimum data points needed before z-score trading activates."},
             ],
         },
         {
@@ -662,9 +639,9 @@ async def admin_copy_preview(
 async def _intents_preview_core(bot: Any, agent: str, limit: int) -> dict[str, Any]:
     """
     Preview current agent intents and gate decisions without placing orders.
-    agent: all|value_edge|copy_signal|latency_arb|bundle_arb|zscore_edge
+    agent: all|copy_signal|weather_arb
     """
-    allowed_agents = {"all", "value_edge", "copy_signal", "latency_arb", "bundle_arb", "zscore_edge"}
+    allowed_agents = {"all", "copy_signal", "weather_arb"}
     if agent not in allowed_agents:
         raise HTTPException(status_code=400, detail=f"agent must be one of: {sorted(allowed_agents)}")
 
@@ -715,21 +692,12 @@ async def _intents_preview_core(bot: Any, agent: str, limit: int) -> dict[str, A
 
     tasks = []
     labels: list[str] = []
-    if agent in ("all", "value_edge") and bot.settings.agent_value:
-        labels.append("value_edge")
-        tasks.append(bot._value_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
     if agent in ("all", "copy_signal") and bot.settings.agent_copy and bot.settings.copy_watch_wallets:
         labels.append("copy_signal")
         tasks.append(bot._copy_agent.propose(bot._http))
-    if agent in ("all", "latency_arb") and bot.settings.agent_latency:
-        labels.append("latency_arb")
-        tasks.append(bot._latency_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
-    if agent in ("all", "bundle_arb") and bot.settings.agent_bundle:
-        labels.append("bundle_arb")
-        tasks.append(bot._bundle_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
-    if agent in ("all", "zscore_edge") and bot.settings.agent_zscore:
-        labels.append("zscore_edge")
-        tasks.append(bot._zscore_agent.propose(bot.clob, markets, pos_tokens, bot._rate_limit))
+    if agent in ("all", "weather_arb") and bot.settings.agent_weather:
+        labels.append("weather_arb")
+        tasks.append(bot._weather_agent.propose(bot._http))
 
     if not tasks:
         return {"ok": True, "agent": agent, "enabled_agents": [], "items": [], "note": "no_enabled_agents"}
@@ -835,7 +803,7 @@ async def admin_intents_preview(
 ):
     """
     Preview current agent intents and gate decisions without placing orders.
-    agent: all|value_edge|copy_signal|latency_arb|bundle_arb|zscore_edge
+    agent: all|copy_signal|weather_arb
     """
     bot = _trader(request)
     if not bot or not getattr(bot, "_http", None):
@@ -855,11 +823,8 @@ def admin_reload_settings(
     try:
         bot.settings = Settings.load()
         bot.state.mode = "dry_run" if bot.settings.dry_run else "live"
-        bot._value_agent.settings = bot.settings  # type: ignore[attr-defined]
         bot._copy_agent.settings = bot.settings  # type: ignore[attr-defined]
-        bot._latency_agent.settings = bot.settings  # type: ignore[attr-defined]
-        bot._bundle_agent.settings = bot.settings  # type: ignore[attr-defined]
-        bot._zscore_agent.settings = bot.settings  # type: ignore[attr-defined]
+        bot._weather_agent.settings = bot.settings  # type: ignore[attr-defined]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     from bot.agents.registry import agents_status as _agents_status

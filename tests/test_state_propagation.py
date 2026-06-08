@@ -255,9 +255,9 @@ class TestAgentsStatusRuntime(unittest.TestCase):
 
     def test_without_runtime_defaults_to_false(self):
         """Without cycle_runtime, new fields default to False/0/empty."""
-        s = Settings(agent_value=True)
+        s = Settings(agent_weather=True)
         statuses = agents_status(s)
-        ve = next(a for a in statuses if a["id"] == "value_edge")
+        ve = next(a for a in statuses if a["id"] == "weather_arb")
         self.assertTrue(ve["enabled"])
         self.assertFalse(ve["scheduled"])
         self.assertFalse(ve["ran"])
@@ -266,13 +266,13 @@ class TestAgentsStatusRuntime(unittest.TestCase):
 
     def test_with_runtime_reflects_agent_state(self):
         """cycle_runtime is surfaced in agent status output."""
-        s = Settings(agent_value=True, agent_copy=True, copy_watch_wallets=[self.VALID_WALLET])
+        s = Settings(agent_weather=True, agent_copy=True, copy_watch_wallets=[self.VALID_WALLET])
         rt = {
-            "value_edge": {"scheduled": True, "ran": True, "intents": 3, "note": ""},
+            "weather_arb": {"scheduled": True, "ran": True, "intents": 3, "note": ""},
             "copy_signal": {"scheduled": True, "ran": True, "intents": 0, "note": "cold_start_seeded=15; polled=1/1; new=0"},
         }
         statuses = agents_status(s, cycle_runtime=rt)
-        ve = next(a for a in statuses if a["id"] == "value_edge")
+        ve = next(a for a in statuses if a["id"] == "weather_arb")
         self.assertTrue(ve["enabled"])
         self.assertTrue(ve["scheduled"])
         self.assertTrue(ve["ran"])
@@ -298,12 +298,12 @@ class TestAgentsStatusRuntime(unittest.TestCase):
 
     def test_error_agent_ran_false(self):
         """Agent that raised an exception: ran=False, note has error."""
-        s = Settings(agent_latency=True)
+        s = Settings(agent_weather=True)
         rt = {
-            "latency_arb": {"scheduled": True, "ran": False, "intents": 0, "note": "error: timeout"},
+            "weather_arb": {"scheduled": True, "ran": False, "intents": 0, "note": "error: timeout"},
         }
         statuses = agents_status(s, cycle_runtime=rt)
-        la = next(a for a in statuses if a["id"] == "latency_arb")
+        la = next(a for a in statuses if a["id"] == "weather_arb")
         self.assertTrue(la["enabled"])
         self.assertTrue(la["scheduled"])
         self.assertFalse(la["ran"])
@@ -311,20 +311,20 @@ class TestAgentsStatusRuntime(unittest.TestCase):
 
     def test_triggered_state_semantics(self):
         """Dashboard: enabled + ran + intents > 0 = TRIGGERED."""
-        s = Settings(agent_value=True)
-        rt = {"value_edge": {"scheduled": True, "ran": True, "intents": 5, "note": ""}}
+        s = Settings(agent_weather=True)
+        rt = {"weather_arb": {"scheduled": True, "ran": True, "intents": 5, "note": ""}}
         statuses = agents_status(s, cycle_runtime=rt)
-        ve = next(a for a in statuses if a["id"] == "value_edge")
+        ve = next(a for a in statuses if a["id"] == "weather_arb")
         self.assertTrue(ve["enabled"])
         self.assertTrue(ve["ran"])
         self.assertGreater(ve["intents"], 0)
 
     def test_armed_state_semantics(self):
         """Dashboard: enabled + ran + intents == 0 = ARMED (no opportunities)."""
-        s = Settings(agent_value=True)
-        rt = {"value_edge": {"scheduled": True, "ran": True, "intents": 0, "note": ""}}
+        s = Settings(agent_weather=True)
+        rt = {"weather_arb": {"scheduled": True, "ran": True, "intents": 0, "note": ""}}
         statuses = agents_status(s, cycle_runtime=rt)
-        ve = next(a for a in statuses if a["id"] == "value_edge")
+        ve = next(a for a in statuses if a["id"] == "weather_arb")
         self.assertTrue(ve["enabled"])
         self.assertTrue(ve["ran"])
         self.assertEqual(ve["intents"], 0)
@@ -360,9 +360,9 @@ class TestBotStateCycleRuntime(unittest.TestCase):
     def test_can_set_runtime(self):
         state = BotState()
         state.cycle_agent_runtime = {
-            "value_edge": {"scheduled": True, "ran": True, "intents": 2, "note": ""},
+            "weather_arb": {"scheduled": True, "ran": True, "intents": 2, "note": ""},
         }
-        self.assertEqual(state.cycle_agent_runtime["value_edge"]["intents"], 2)
+        self.assertEqual(state.cycle_agent_runtime["weather_arb"]["intents"], 2)
 
 
 class TestCopyManagerPersistence(unittest.TestCase):
@@ -449,11 +449,8 @@ class TestReloadKeepsSettingsOnError(unittest.TestCase):
         bot = MagicMock()
         bot.settings = old_settings
         bot.state = BotState(mode="dry_run")
-        bot._value_agent = MagicMock()
         bot._copy_agent = MagicMock()
-        bot._latency_agent = MagicMock()
-        bot._bundle_agent = MagicMock()
-        bot._zscore_agent = MagicMock()
+        bot._weather_agent = MagicMock()
 
         from bot.orchestrator import TradingBot
 

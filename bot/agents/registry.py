@@ -37,34 +37,6 @@ AGENTS: tuple[AgentInfo, ...] = (
         priority=90,
         status="testing",
     ),
-    AgentInfo(
-        id="value_edge",
-        title="Value edge",
-        short="RETIRED — price-pattern vs an efficient market (measured -88 to -143 bps/fill, 44% win; adverse selection).",
-        priority=50,
-        status="retired",
-    ),
-    AgentInfo(
-        id="zscore_edge",
-        title="Z-score edge",
-        short="RETIRED — mean-reversion price-pattern; beaten by an efficient market.",
-        priority=48,
-        status="retired",
-    ),
-    AgentInfo(
-        id="latency_arb",
-        title="Latency arb",
-        short="RETIRED — 5-min crypto Up/Down needs sub-second speed; infeasible on REST.",
-        priority=65,
-        status="retired",
-    ),
-    AgentInfo(
-        id="bundle_arb",
-        title="Bundle arb",
-        short="RETIRED — no complete-set arbs exist (min YES+NO ask 1.001 across 56 liquid markets).",
-        priority=72,
-        status="retired",
-    ),
 )
 
 
@@ -86,11 +58,7 @@ def agents_status(
     When omitted the output is backwards-compatible (config-only view).
     """
     enabled = {
-        "value_edge": bool(getattr(settings, "agent_value", False)),
         "copy_signal": bool(getattr(settings, "agent_copy", False)),
-        "latency_arb": bool(getattr(settings, "agent_latency", False)),
-        "bundle_arb": bool(getattr(settings, "agent_bundle", False)),
-        "zscore_edge": bool(getattr(settings, "agent_zscore", False)),
         "weather_arb": bool(getattr(settings, "agent_weather", False)),
     }
     config_notes: dict[str, str] = {}
