@@ -1,4 +1,10 @@
-"""Registered strategy agents — single source of truth for UI and docs."""
+"""Registered strategy agents — single source of truth for UI and docs.
+
+Strategy space is fully mapped (every approach measured, not guessed). Only
+INFORMATION edges survive on an efficient market: copy (proven) + weather
+(testing). Price-pattern and speed/arbitrage agents are RETIRED — beaten by the
+market, not broken. ``status`` drives how the UI presents each agent.
+"""
 
 from __future__ import annotations
 
@@ -12,44 +18,52 @@ class AgentInfo:
     title: str
     short: str
     priority: int
+    status: str = "retired"  # "live" | "testing" | "retired"
 
 
+# Ordered: the two agents we actually run/focus on first, retired ones last.
 AGENTS: tuple[AgentInfo, ...] = (
-    AgentInfo(
-        id="value_edge",
-        title="Value edge",
-        short="Scans Gamma tradeables; compares CLOB mid vs bands; proposes BUY on Yes/No value setups.",
-        priority=50,
-    ),
     AgentInfo(
         id="copy_signal",
         title="Copy signal",
-        short="Watches COPY_WATCH_WALLETS activity on Data API; proposes mirroring new BUYs (cold-start dedupes history).",
+        short="Mirrors vetted whale BUYs on judgment markets — our proven edge. Judgment-only, per-wallet scored, event-deduped, EV-gated.",
         priority=100,
-    ),
-    AgentInfo(
-        id="latency_arb",
-        title="Latency arb",
-        short="Gamma outcomePrices vs CLOB mid; BUY when the slower quote is richer than the book (cross-feed lag).",
-        priority=65,
-    ),
-    AgentInfo(
-        id="bundle_arb",
-        title="Bundle arb",
-        short="When best YES ask + best NO ask is below 1 (net of buffer), BUY both legs as one execution unit.",
-        priority=72,
-    ),
-    AgentInfo(
-        id="zscore_edge",
-        title="Z-score edge",
-        short="Rolling z-score on YES mid per market; mean-reversion BUY on stretched YES or NO.",
-        priority=48,
+        status="live",
     ),
     AgentInfo(
         id="weather_arb",
         title="Weather arb",
-        short="Compares Open-Meteo GFS forecast to Polymarket temperature markets; BUY YES/NO when forecast edge > threshold.",
+        short="Open-Meteo forecast vs temperature markets. PAUSED for live capital — a threshold/CDF paper-test is deciding whether the edge is real.",
         priority=90,
+        status="testing",
+    ),
+    AgentInfo(
+        id="value_edge",
+        title="Value edge",
+        short="RETIRED — price-pattern vs an efficient market (measured -88 to -143 bps/fill, 44% win; adverse selection).",
+        priority=50,
+        status="retired",
+    ),
+    AgentInfo(
+        id="zscore_edge",
+        title="Z-score edge",
+        short="RETIRED — mean-reversion price-pattern; beaten by an efficient market.",
+        priority=48,
+        status="retired",
+    ),
+    AgentInfo(
+        id="latency_arb",
+        title="Latency arb",
+        short="RETIRED — 5-min crypto Up/Down needs sub-second speed; infeasible on REST.",
+        priority=65,
+        status="retired",
+    ),
+    AgentInfo(
+        id="bundle_arb",
+        title="Bundle arb",
+        short="RETIRED — no complete-set arbs exist (min YES+NO ask 1.001 across 56 liquid markets).",
+        priority=72,
+        status="retired",
     ),
 )
 
@@ -72,7 +86,7 @@ def agents_status(
     When omitted the output is backwards-compatible (config-only view).
     """
     enabled = {
-        "value_edge": bool(getattr(settings, "agent_value", True)),
+        "value_edge": bool(getattr(settings, "agent_value", False)),
         "copy_signal": bool(getattr(settings, "agent_copy", False)),
         "latency_arb": bool(getattr(settings, "agent_latency", False)),
         "bundle_arb": bool(getattr(settings, "agent_bundle", False)),
@@ -96,6 +110,7 @@ def agents_status(
                 "title": a.title,
                 "description": a.short,
                 "priority": a.priority,
+                "status": a.status,
                 "enabled": enabled.get(a.id, False),
                 "scheduled": info.get("scheduled", False),
                 "ran": info.get("ran", False),

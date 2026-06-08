@@ -884,8 +884,10 @@ function renderAgents(detail) {
     countEl.textContent = '';
     return;
   }
-  const enabledCount = detail.filter(a => a.enabled).length;
-  countEl.textContent = enabledCount + '/' + detail.length + ' on';
+  const live = detail.filter(a => a.status === 'live').length;
+  const testing = detail.filter(a => a.status === 'testing').length;
+  const retired = detail.filter(a => a.status === 'retired').length;
+  countEl.textContent = live + ' live · ' + testing + ' testing · ' + retired + ' retired';
 
   el.innerHTML = detail.map(a => {
     const on = !!a.enabled;
@@ -893,29 +895,31 @@ function renderAgents(detail) {
     const ran = !!a.ran;
     const intents = a.intents || 0;
     const note = a.note || '';
+    const status = a.status || 'retired';
 
     const needsConfig = on && note && (note.includes('no wallets') || note.includes('needs config') || note.includes('no CLOB keys') || note.includes('Copy agent needs'));
 
-    let statusPill, statusClass;
-    if (!on) {
-      statusPill = 'OFF'; statusClass = 'pill-off';
+    let statusPill, statusClass, cardClass;
+    if (status === 'retired') {
+      statusPill = 'RETIRED'; statusClass = 'pill-off'; cardClass = 'off';
+    } else if (status === 'testing') {
+      statusPill = 'PAPER-TEST'; statusClass = 'pill-warn'; cardClass = 'warn';
+    } else if (!on) {
+      statusPill = 'OFF'; statusClass = 'pill-off'; cardClass = 'off';
     } else if (needsConfig) {
-      statusPill = 'NEEDS CONFIG'; statusClass = 'pill-warn';
+      statusPill = 'NEEDS CONFIG'; statusClass = 'pill-warn'; cardClass = 'warn';
     } else if (ran && intents > 0) {
-      statusPill = 'TRIGGERED (' + intents + ')'; statusClass = 'pill-triggered';
+      statusPill = 'TRIGGERED (' + intents + ')'; statusClass = 'pill-triggered'; cardClass = '';
     } else if (ran) {
-      statusPill = 'ARMED'; statusClass = 'pill-armed';
-    } else if (scheduled) {
-      statusPill = 'ENABLED'; statusClass = 'pill-on';
+      statusPill = 'ARMED'; statusClass = 'pill-armed'; cardClass = '';
     } else {
-      statusPill = 'ENABLED'; statusClass = 'pill-on';
+      statusPill = 'ENABLED'; statusClass = 'pill-on'; cardClass = '';
     }
 
     const noteHtml = note
       ? '<div class="meta mono" style="margin-top:3px;font-size:0.65rem;color:' + (needsConfig ? 'var(--warn)' : 'var(--muted)') + ';word-break:break-all;">' + escHtml(note) + '</div>'
       : '';
 
-    const cardClass = on ? (needsConfig ? 'warn' : '') : 'off';
     return '<div class="agent-card ' + cardClass + '">' +
       '<h3>' + escHtml(a.title || a.id) + ' <span class="pill ' + statusClass + '">' + statusPill + '</span></h3>' +
       '<div class="meta mono">id: ' + escHtml(a.id) + ' &middot; priority ' + a.priority + '</div>' +
