@@ -84,7 +84,7 @@ def default_kv_seed() -> dict[str, str]:
         "reconcile_history_depth": "15",
         "reconcile_poll_sleep_s": "0.06",
         "open_orders_display_limit": "40",
-        "agent_value": "true",
+        "agent_value": "false",
         "agent_copy": "false",
         "agent_latency": "false",
         "agent_bundle": "false",
@@ -231,7 +231,7 @@ class Settings:
     reconcile_poll_sleep_s: float = 0.06
     open_orders_display_limit: int = 40
 
-    agent_value: bool = True
+    agent_value: bool = False
     agent_copy: bool = False
     agent_latency: bool = False
     agent_bundle: bool = False
