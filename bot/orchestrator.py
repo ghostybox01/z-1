@@ -758,9 +758,11 @@ class TradingBot:
             placed = 0
         else:
             await self.refresh_open_orders()
-            markets_by_cid: dict[str, dict[str, Any]] = {
-                str(m.get("condition_id") or ""): m for m in markets if m.get("condition_id")
-            }
+            # Copy/weather-only mode does not run the gamma market scan, so there
+            # is no market metadata to map. The downstream gates fall back to each
+            # intent's own category (line ~570) and skip resolution-metadata
+            # lookups (line ~594), so an empty map is correct and safe.
+            markets_by_cid: dict[str, dict[str, Any]] = {}
             rolling_n = rolling_notional_usd(
                 self.state.trade_history,
                 hours=float(self.settings.daily_notional_window_hours or 24.0),
